@@ -270,6 +270,7 @@ class FunnelStage(BaseModel):
 class LLMRunInfo(BaseModel):
     groups: dict[str, list[str]] = Field(default_factory=dict, description="Сконфигурированные деплойменты групп")
     models_used: dict[str, int] = Field(default_factory=dict, description="Модель → число успешных вызовов")
+    cached_models: list[str] = Field(default_factory=list, description="Модели, чьи результаты взяты из кэша шагов")
     prompt_versions: dict[str, str] = Field(default_factory=dict)
     passes: list[PassStatus] = Field(default_factory=list)
     llm_calls: int = 0

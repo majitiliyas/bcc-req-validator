@@ -81,7 +81,8 @@ def analyze(
         console.print(f"  [yellow]•[/yellow] {w}")
     if info is not None:
         console.print(f"LLM: вызовов {info.llm_calls}, из кэша {info.cache_hits}, модели: "
-                      f"{', '.join(info.models_used) or '—'}")
+                      f"{', '.join(info.models_used) or '—'}"
+                      + (f" (из кэша: {', '.join(info.cached_models)})" if info.cached_models and not info.models_used else ""))
         for p in info.passes:
             color = {"ok": "green", "partial": "yellow", "failed": "red"}.get(p.status, "white")
             console.print(f"  [{color}]{p.status:>7}[/] {p.name}: {p.detail}")

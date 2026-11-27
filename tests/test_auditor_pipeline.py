@@ -209,6 +209,9 @@ def test_sqlite_cache_second_run_uses_no_api(llm_settings: Settings, doc_path: P
     assert r2.passport.llm.llm_calls == 0 and r2.passport.llm.cache_hits >= 4
     assert [(d.rule_id, d.req_id, d.severity) for d in r1.defects] == [(d.rule_id, d.req_id, d.severity) for d in r2.defects]
     assert any("кэша" in n for n in r2.passport.pipeline_notes)
+    # паспорт не должен утверждать, что LLM недоступна, если всё взято из кэша
+    assert "недоступна" not in r2.passport.model and "из кэша" in r2.passport.model
+    assert r2.passport.llm.cached_models and not r2.verdict.is_preliminary
 
 
 def test_cache_key_depends_on_prompt_and_input(tmp_path: Path) -> None:

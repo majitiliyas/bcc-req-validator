@@ -192,7 +192,9 @@ def _llm_view(report: AuditReport) -> dict[str, Any] | None:
     if info is None:
         return None
     return {
-        "models_used": ", ".join(f"{m} ×{n}" for m, n in info.models_used.items()) or "—",
+        "models_used": (", ".join(f"{m} ×{n}" for m, n in info.models_used.items())
+                        or (f"в этом прогоне вызовов нет; из кэша: {', '.join(info.cached_models)}"
+                            if info.cached_models else "—")),
         "routes": [{"group": g, "chain": " → ".join(ds) if ds else "нет доступных моделей"}
                    for g, ds in info.groups.items()],
         "prompts": ", ".join(f"{k}@{v}" for k, v in info.prompt_versions.items()),

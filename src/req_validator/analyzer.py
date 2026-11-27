@@ -145,6 +145,11 @@ def run_audit(input_path: str | Path, *, demo: bool = True, settings: Settings |
         model = DEMO_MODEL_LABEL
     elif llm_info and llm_info.models_used:
         model = ", ".join(f"{m} ×{n}" for m, n in sorted(llm_info.models_used.items(), key=lambda kv: -kv[1]))
+        extra = [m for m in llm_info.cached_models if m not in llm_info.models_used]
+        if extra:
+            model += "; из кэша: " + ", ".join(extra)
+    elif llm_info and llm_info.cached_models:
+        model = ", ".join(llm_info.cached_models) + " (все LLM-шаги взяты из кэша)"
     else:
         model = "LLM недоступна — отчёт построен детерминированным слоем"
     if llm_info is not None and outcome is not None:
@@ -200,6 +205,7 @@ def _run_llm(settings: Settings, doc: IngestionResult, reqs: list, rule_defects:
     info.budget = router.guard.snapshot()
     if outcome is not None:
         info.passes = outcome.passes
+        info.cached_models = sorted({m for p in outcome.passes for m in p.models})
         info.unverified_rejected = len(outcome.rejected)
         info.rejected_examples = [f"{label} — {reason}" for label, reason in outcome.rejected[:10]]
         info.critic = outcome.critic_stats
