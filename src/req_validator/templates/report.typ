@@ -64,6 +64,25 @@
   ]
 ]
 
+#if d.llm != none [
+  === LLM-аудит
+  #table(columns: (4.2cm, 1fr),
+    [Параметр], [Значение],
+    [Модели], [#d.llm.models_used],
+    [Маршрутизация], [#text(size: 8pt, d.llm.groups)],
+    [Версии промптов], [#text(size: 7.5pt, d.llm.prompts)],
+    [Вызовов / из кэша], [#str(d.llm.calls) / #str(d.llm.cache_hits); токены #d.llm.tokens; 429: #str(d.llm.rate_limited); перенаправлений: #str(d.llm.reroutes)],
+    [Отклонено без цитаты], [#str(d.llm.unverified)],
+    [Критик], [#d.llm.critic],
+    [Маскирование ПДн], [#d.llm.pii],
+    [Бюджет / реестр], [#d.llm.budget · #d.llm.registry],
+  )
+  #table(columns: (5cm, 2.2cm, 1.8cm, 1fr),
+    [Проход], [Статус], [Вызовы / кэш], [Детали],
+    ..d.llm.passes.map(ps => (ps.name, ps.raw_status, str(ps.calls) + " / " + str(ps.cache), ps.detail)).flatten(),
+  )
+]
+
 == 1. Нарезка требований
 Выделено *#m.total_requirements* требований; явный ID в документе — у *#m.requirements_with_explicit_id*. Остальным присвоены ID агента REQ-xxx.
 
@@ -91,8 +110,9 @@
     *#x.req_id* #if x.source_id != "—" [· #x.source_id] — #x.section
     #block(fill: luma(248), stroke: (left: 2pt + luma(200)), inset: 6pt, width: 100%, text(size: 8.5pt, x.quote))
     #for f in x.defects [
-      #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) · #f.priority \
+      #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) · #f.priority · #text(fill: luma(100), f.source_label + "; " + f.review) \
       _Цитата:_ «#f.quote» \
+      #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_quote» \ ]
       _Проблема:_ #f.explanation \
       _Риск:_ #f.risk \
       _Как исправить:_ #f.suggestion
@@ -112,8 +132,9 @@
     c.comment + if c.defect_ids.len() > 0 { " — " + c.defect_ids.join(", ") } else { "" })).flatten(),
 )
 #for f in d.set_defects [
-  #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) \
+  #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) · #text(fill: luma(100), f.source_label + "; " + f.review) \
   _Цитата:_ «#f.quote» \
+  #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_quote» \ ]
   _Проблема:_ #f.explanation \
   _Как исправить:_ #f.suggestion
   #v(3pt)
@@ -143,7 +164,8 @@
 == 5. Итог
 #block(fill: luma(247), stroke: (left: 3pt + verdict-color), inset: 9pt, width: 100%)[
   #text(weight: "bold", fill: verdict-color, size: 11pt, vd.text) \
-  #vd.rationale
+  #vd.rationale \
+  #text(fill: luma(90))[Решающее условие: #vd.gate#if vd.blocking != "" [ · блокирующие дефекты: #vd.blocking]]
 ]
 #table(columns: (5cm, 1.2cm, 1fr),
   [Вопрос], [Ответ], [Пояснение],

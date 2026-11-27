@@ -119,12 +119,16 @@ def test_cli_rejects_unknown_format(fixtures: Path, tmp_path: Path) -> None:
 
 
 def test_sdk_retries_disabled(settings) -> None:
-    from req_validator.router import make_gemini_client, make_openai_compatible_client
+    from pydantic import SecretStr
 
-    client = make_openai_compatible_client("groq", "test-key", settings)
-    assert client.max_retries == 0
-    gem = make_gemini_client("test-key", settings)
-    assert gem is not None
+    from req_validator.router import OpenAICompatTransport, build_groups
+
+    s = settings.model_copy(update={"gemini_api_key": SecretStr("g-test"), "groq_api_key": SecretStr("q-test"),
+                                    "enable_ollama": False})
+    transport = OpenAICompatTransport(s)
+    for deps in build_groups(s).values():
+        for dep in deps:
+            assert transport.client(dep).max_retries == 0  # повторы делает только роутер
 
 
 def test_mask_pii() -> None:

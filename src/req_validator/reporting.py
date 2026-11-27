@@ -12,7 +12,17 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined, select_autoescape
 
-from .models import AuditReport, BlockType, CheckStatus, Defect, RequirementKind, Severity, VerdictStatus
+from .models import (
+    AuditReport,
+    BlockType,
+    CheckStatus,
+    Defect,
+    FindingSource,
+    RequirementKind,
+    ReviewStatus,
+    Severity,
+    VerdictStatus,
+)
 from .standards import SET_CRITERIA, SINGLE_CRITERIA
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
@@ -67,8 +77,31 @@ def _section(path: str, depth: int = 2) -> str:
     return " > ".join(parts[-depth:]) if parts else "—"
 
 
+REVIEW_TEXT = {
+    ReviewStatus.DETERMINISTIC: "детерминированное правило",
+    ReviewStatus.CONFIRMED: "подтверждено Критиком",
+    ReviewStatus.DOWNGRADED: "понижено Критиком",
+    ReviewStatus.NOT_REVIEWED: "не проверялось Критиком",
+}
+GATE_TEXT = {
+    "FATAL_GATE": "некомпенсаторный FATAL-гейт", "SCORE": "индекс готовности", "UNREVIEWED_FATAL":
+    "неподтверждённый FATAL (только ручная проверка)", "INGESTION": "документ не прочитан", "—": "—", "": "—",
+}
+PASS_STATUS_TEXT = {"ok": "✅ выполнен", "partial": "⚠️ частично", "failed": "❌ сбой", "skipped": "— пропущен"}
+
+
+def _source_label(d: Defect) -> str:
+    if d.source == FindingSource.RULES:
+        return "правила"
+    where = {"pass1": "LLM Pass 1", "pass2": "LLM Pass 2"}.get(d.pass_name or "", "LLM")
+    return f"{where} ({d.model})" if d.model else where
+
+
 def _defect_view(d: Defect) -> dict[str, Any]:
     return {
+        "source_label": _source_label(d), "review": REVIEW_TEXT[d.review_status], "review_note": d.review_note,
+        "related_quote": d.related_quote or "", "related_req": ", ".join(d.related_req_ids) or "",
+        "original_severity": d.original_severity.value if d.original_severity else "",
         "id": d.defect_id, "severity": d.severity.value, "priority": d.priority, "rule_id": d.rule_id,
         "criterion": d.criterion, "type": DEFECT_TYPE.get(d.rule_id.split("/")[0], "прочее"),
         "req_id": d.req_id or "весь документ", "section": _section(d.section_path, 3), "quote": d.exact_quote,
@@ -137,8 +170,10 @@ def build_view(report: AuditReport) -> dict[str, Any]:
             "status": v.status.value, "text": VERDICT_TEXT[v.status], "icon": VERDICT_ICON[v.status],
             "rationale": v.rationale, "dev": "да" if v.can_start_development else "нет",
             "test": "да" if v.can_start_testing else "нет", "dev_note": v.development_note, "test_note": v.testing_note,
-            "preliminary": v.is_preliminary,
+            "preliminary": v.is_preliminary, "gate": GATE_TEXT.get(v.gate, v.gate),
+            "blocking": ", ".join(v.blocking_defect_ids),
         },
+        "llm": _llm_view(report),
         "criteria": [{"rule_id": c.rule_id, "name": c.name_ru, "short": CRITERION_SHORT[c.rule_id], "reference": c.reference,
                       "definition": c.definition, "coverage": c.rules_coverage or "только LLM (Спринт 2)"} for c in SINGLE_CRITERIA],
         "set_criteria": [{"rule_id": c.rule_id, "name": c.name_ru, "reference": c.reference} for c in SET_CRITERIA],
@@ -147,6 +182,27 @@ def build_view(report: AuditReport) -> dict[str, Any]:
         "defects": defects, "critical": critical,
         "remediation": [r.model_dump() for r in report.remediation_plan],
         "top_fixes": [r.model_dump() for r in report.remediation_plan[:5]],
+    }
+
+
+def _llm_view(report: AuditReport) -> dict[str, Any] | None:
+    info = report.passport.llm
+    if info is None:
+        return None
+    return {
+        "models_used": ", ".join(f"{m} ×{n}" for m, n in info.models_used.items()) or "—",
+        "groups": "; ".join(f"{g}: {' → '.join(ds) or 'нет ключей'}" for g, ds in info.groups.items()),
+        "prompts": ", ".join(f"{k}@{v}" for k, v in info.prompt_versions.items()),
+        "passes": [{"name": p.name, "status": PASS_STATUS_TEXT.get(p.status, p.status), "raw_status": p.status,
+                    "detail": p.detail, "calls": p.llm_calls, "cache": p.cache_hits} for p in info.passes],
+        "calls": info.llm_calls, "cache_hits": info.cache_hits,
+        "tokens": f"{info.prompt_tokens} / {info.completion_tokens}",
+        "rate_limited": info.rate_limited, "reroutes": info.reroutes,
+        "unverified": info.unverified_rejected, "rejected_examples": info.rejected_examples,
+        "critic": ", ".join(f"{k}: {v}" for k, v in info.critic.items()) or "—",
+        "pii": ", ".join(f"{k}: {v}" for k, v in info.pii_masked.items()) or "не обнаружено",
+        "budget": ", ".join(f"{k}: {v}" for k, v in info.budget.items()),
+        "registry": ", ".join(f"{k}: {v}" for k, v in info.registry_size.items()) or "—",
     }
 
 

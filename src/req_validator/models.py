@@ -160,6 +160,17 @@ class FindingSource(StrEnum):
     LLM = "llm"
 
 
+class ReviewStatus(StrEnum):
+    DETERMINISTIC = "DETERMINISTIC"  # найдено правилом — подтверждено конструкцией
+    CONFIRMED = "CONFIRMED"  # подтверждено независимым Критиком
+    DOWNGRADED = "DOWNGRADED"  # Критик подтвердил, но понизил критичность
+    NOT_REVIEWED = "NOT_REVIEWED"  # Критик не запускался (MINOR) или был недоступен
+
+    @property
+    def confirmed(self) -> bool:
+        return self in (ReviewStatus.DETERMINISTIC, ReviewStatus.CONFIRMED, ReviewStatus.DOWNGRADED)
+
+
 class Defect(BaseModel):
     defect_id: str = Field(description="DEF-001…, присваивается детерминированно")
     severity: Severity
@@ -177,6 +188,13 @@ class Defect(BaseModel):
     suggestion: str
     risk: str = Field(default="", description="Тип риска для бизнеса/разработки/QA")
     source: FindingSource = FindingSource.RULES
+    related_quote: str | None = Field(default=None, description="Вторая дословная цитата (для противоречий)")
+    related_quote_verified: bool = False
+    review_status: ReviewStatus = ReviewStatus.DETERMINISTIC
+    review_note: str = Field(default="", description="Обоснование Критика / модель Критика")
+    original_severity: Severity | None = None
+    model: str | None = Field(default=None, description="Модель, сгенерировавшая находку")
+    pass_name: str | None = Field(default=None, description="pass1 | pass2 | rules")
 
     @property
     def priority(self) -> str:
@@ -232,6 +250,34 @@ class VerdictStatus(StrEnum):
     CANNOT_PROCEED = "CANNOT_PROCEED"
 
 
+class PassStatus(BaseModel):
+    name: str
+    status: str = Field(description="ok | partial | failed | skipped")
+    detail: str = ""
+    llm_calls: int = 0
+    cache_hits: int = 0
+    items: int = 0
+
+
+class LLMRunInfo(BaseModel):
+    groups: dict[str, list[str]] = Field(default_factory=dict, description="Сконфигурированные деплойменты групп")
+    models_used: dict[str, int] = Field(default_factory=dict, description="Модель → число успешных вызовов")
+    prompt_versions: dict[str, str] = Field(default_factory=dict)
+    passes: list[PassStatus] = Field(default_factory=list)
+    llm_calls: int = 0
+    cache_hits: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    rate_limited: int = 0
+    reroutes: int = 0
+    unverified_rejected: int = 0
+    rejected_examples: list[str] = Field(default_factory=list)
+    critic: dict[str, int] = Field(default_factory=dict)
+    pii_masked: dict[str, int] = Field(default_factory=dict)
+    budget: dict[str, object] = Field(default_factory=dict)
+    registry_size: dict[str, int] = Field(default_factory=dict)
+
+
 class RunPassport(BaseModel):
     document_title: str
     file_name: str
@@ -252,6 +298,7 @@ class RunPassport(BaseModel):
     ingestion_status: IngestionStatus
     ingestion_warnings: list[str] = Field(default_factory=list)
     pipeline_notes: list[str] = Field(default_factory=list)
+    llm: LLMRunInfo | None = None
 
 
 class SummaryMetrics(BaseModel):
@@ -283,6 +330,8 @@ class Verdict(BaseModel):
     development_note: str
     testing_note: str
     is_preliminary: bool = Field(default=False, description="True в демо-режиме: семантика LLM не проверялась")
+    blocking_defect_ids: list[str] = Field(default_factory=list, description="Подтверждённые FATAL, блокирующие старт")
+    gate: str = Field(default="", description="Сработавший гейт: FATAL_GATE | SCORE | UNREVIEWED_FATAL | —")
 
 
 class AuditReport(BaseModel):

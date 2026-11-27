@@ -3,7 +3,7 @@
 > {{ verdict.icon }} **Итог: {{ verdict.text }}** · индекс готовности **{{ metrics.readiness_score }}/100** · требований: **{{ metrics.total_requirements }}** · дефектов: **{{ metrics.total_defects }}** (FATAL {{ metrics.fatal_count }} / MAJOR {{ metrics.major_count }} / MINOR {{ metrics.minor_count }})
 {% if verdict.preliminary %}
 >
-> ⚠️ Вердикт предварительный: в режиме «{{ passport.mode }}» выполнены только детерминированные проверки. Критерии, отмеченные ◻️, требуют семантического (LLM) прохода.
+> ⚠️ Вердикт предварительный: семантические LLM-проверки выполнены не полностью (режим «{{ passport.mode }}»). Критерии, отмеченные ◻️, не проверялись.
 {% endif %}
 
 ## Паспорт прогона
@@ -30,6 +30,40 @@
 {% for n in passport.notes %}
 - {{ n }}
 {% endfor %}
+{% endif %}
+
+{% if llm %}
+### LLM-аудит
+
+| Параметр | Значение |
+| :--- | :--- |
+| Использованные модели | {{ llm.models_used | cell }} |
+| Маршрутизация (группы) | {{ llm.groups | cell }} |
+| Версии промптов | {{ llm.prompts | cell }} |
+| Вызовов LLM / из кэша SQLite | {{ llm.calls }} / {{ llm.cache_hits }} |
+| Токены (вход / выход) | {{ llm.tokens }} |
+| 429 / перенаправлений (TPM-гард) | {{ llm.rate_limited }} / {{ llm.reroutes }} |
+| Отклонено без подтверждённой цитаты | {{ llm.unverified }} |
+| Критик | {{ llm.critic | cell }} |
+| Маскирование ПДн перед отправкой | {{ llm.pii | cell }} |
+| Бюджет прогона | {{ llm.budget | cell }} |
+| Глобальный реестр (Pass 0) | {{ llm.registry | cell }} |
+
+| Проход | Статус | Вызовов / кэш | Детали |
+| :--- | :--- | :---: | :--- |
+{% for ps in llm.passes %}
+| {{ ps.name }} | {{ ps.status }} | {{ ps.calls }} / {{ ps.cache }} | {{ ps.detail | cell }} |
+{% endfor %}
+{% if llm.rejected_examples %}
+
+<details><summary>Отклонённые находки LLM (цитата не подтверждена документом)</summary>
+
+{% for x in llm.rejected_examples %}
+- {{ x }}
+{% endfor %}
+
+</details>
+{% endif %}
 {% endif %}
 
 ## 1. Нарезка требований
@@ -73,12 +107,19 @@
 {{ d.quote | mdquote }}
 
 {% for x in d.defects %}
-- **[{{ x.severity }}]** `{{ x.id }}` · {{ x.criterion }} (`{{ x.rule_id }}`) · приоритет {{ x.priority }}
+- **[{{ x.severity }}]** `{{ x.id }}` · {{ x.criterion }} (`{{ x.rule_id }}`) · приоритет {{ x.priority }} · источник: {{ x.source_label }} · {{ x.review }}{% if x.original_severity %} (было {{ x.original_severity }}){% endif %}
+
   - **Цитата:** «{{ x.quote | cell }}» {% if x.verified %}(проверена, позиция {{ x.position }}){% endif %}
+{% if x.related_quote %}
+  - **Противоречит ({{ x.related_req }}):** «{{ x.related_quote | cell }}»
+{% endif %}
 
   - **Проблема:** {{ x.explanation }}
   - **Риск:** {{ x.risk }}
   - **Как исправить:** {{ x.suggestion }}
+{% if x.review_note %}
+  - *{{ x.review_note }}*
+{% endif %}
 {% endfor %}
 {% for h in d.hints %}
 - ⚠️ *Подсказка* (`{{ h.rule_id }}`): {{ h.message }} — «{{ h.quote | cell }}»
@@ -100,8 +141,11 @@
 {% endfor %}
 
 {% for x in set_defects %}
-- **[{{ x.severity }}]** `{{ x.id }}` · {{ x.criterion }} (`{{ x.rule_id }}`) · {{ x.section | cell }}
+- **[{{ x.severity }}]** `{{ x.id }}` · {{ x.criterion }} (`{{ x.rule_id }}`) · {{ x.section | cell }} · источник: {{ x.source_label }} · {{ x.review }}
   - **Цитата:** «{{ x.quote | cell }}»
+{% if x.related_quote %}
+  - **Противоречит ({{ x.related_req }}):** «{{ x.related_quote | cell }}»
+{% endif %}
   - **Проблема:** {{ x.explanation }}
   - **Как исправить:** {{ x.suggestion }}
 {% endfor %}
@@ -123,10 +167,10 @@
 ### Критичные дефекты (FATAL и MAJOR)
 
 {% if critical %}
-| ID | Уровень | Тип формулировки | Требование | Цитата | Суть |
-| :--- | :--- | :--- | :--- | :--- | :--- |
+| ID | Уровень | Тип формулировки | Требование | Цитата | Суть | Проверка |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 {% for x in critical %}
-| {{ x.id }} | **[{{ x.severity }}]** | {{ x.type }} | {{ x.req_id }} | «{{ x.quote | cell }}» | {{ x.explanation | cell }} |
+| {{ x.id }} | **[{{ x.severity }}]** | {{ x.type }} | {{ x.req_id }}{% if x.related_req %} ↔ {{ x.related_req }}{% endif %} | «{{ x.quote | cell }}»{% if x.related_quote %} ↔ «{{ x.related_quote | cell }}»{% endif %} | {{ x.explanation | cell }} | {{ x.source_label | cell }}; {{ x.review }} |
 {% endfor %}
 {% else %}
 Критичных дефектов не найдено.
@@ -137,6 +181,8 @@
 **{{ verdict.icon }} {{ verdict.text }}**
 
 {{ verdict.rationale }}
+
+Решающее условие: **{{ verdict.gate }}**{% if verdict.blocking %} · блокирующие дефекты: **{{ verdict.blocking }}**{% endif %}.
 
 | Вопрос | Ответ | Пояснение |
 | :--- | :---: | :--- |
@@ -153,4 +199,4 @@
 {% endif %}
 
 ---
-*Отчёт сформирован автоматически агентом req-validator {{ passport.agent_version }} ({{ passport.git_commit }}). Каждое замечание привязано к цитате документа, цитаты проверены программно (RapidFuzz), метрики рассчитаны детерминированно по формулам Definition of Ready.*
+*Отчёт сформирован автоматически агентом req-validator {{ passport.agent_version }} ({{ passport.git_commit }}). Каждое замечание привязано к цитате документа; цитаты проверены программно (RapidFuzz, точное совпадение чисел), находки LLM уровня FATAL/MAJOR проверены независимым Критиком, метрики рассчитаны детерминированно по формулам Definition of Ready.*

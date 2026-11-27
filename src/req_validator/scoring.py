@@ -50,57 +50,88 @@ def compute_metrics(requirements: list[Requirement], defects: list[Defect], hint
     )
 
 
-def decide_verdict(metrics: SummaryMetrics, *, can_proceed: bool, preliminary: bool, reason: str = "") -> Verdict:
+def decide_verdict(
+    metrics: SummaryMetrics,
+    *,
+    can_proceed: bool,
+    preliminary: bool,
+    reason: str = "",
+    defects: list[Defect] | None = None,
+) -> Verdict:
+    """Вердикт DoR. Некомпенсаторный гейт: хотя бы один ПОДТВЕРЖДЁННЫЙ FATAL → REJECTED при любом индексе.
+
+    Подтверждённый FATAL — найденный детерминированным правилом или подтверждённый независимым Критиком.
+    Неподтверждённый FATAL (Критик недоступен) не блокирует безусловно, но исключает APPROVED.
+    """
     if not can_proceed or metrics.total_requirements == 0:
         return Verdict(
             status=VerdictStatus.CANNOT_PROCEED, can_start_development=False, can_start_testing=False,
             rationale=reason or "Документ не удалось прочитать или в нём нет требований — проверка невозможна.",
             development_note="Разработка невозможна: нет проверяемого документа.",
             testing_note="Тестирование невозможно: нет требований для тест-дизайна.",
-            is_preliminary=preliminary,
+            is_preliminary=preliminary, gate="INGESTION",
         )
-    s, f = metrics.readiness_score, metrics.fatal_count
-    if f >= 1 or s < 65:
-        status = VerdictStatus.REJECTED
-        why = []
-        if f:
-            why.append(f"найдено критических дефектов (FATAL): {f}")
-        if s < 65:
-            why.append(f"индекс готовности {s} < 65")
-        rationale = "Документ не готов: " + "; ".join(why) + ". Требуется исправление и повторный аудит."
+    fatal = [d for d in (defects or []) if d.severity == Severity.FATAL]
+    if defects is None:  # совместимость: без списка дефектов считаем все FATAL подтверждёнными
+        confirmed_ids = ["?"] * metrics.fatal_count
+        unreviewed_ids: list[str] = []
+    else:
+        confirmed_ids = [d.defect_id for d in fatal if d.review_status.confirmed]
+        unreviewed_ids = [d.defect_id for d in fatal if not d.review_status.confirmed]
+    s = metrics.readiness_score
+    gate = "—"
+    if confirmed_ids:
+        status, gate = VerdictStatus.REJECTED, "FATAL_GATE"
+        ids = ", ".join(i for i in confirmed_ids if i != "?")
+        rationale = (f"Сработал некомпенсаторный FATAL-гейт: подтверждённых критических дефектов — {len(confirmed_ids)}"
+                     + (f" ({ids})" if ids else "") + f". Индекс готовности ({s}) этого не компенсирует. "
+                     "Документ возвращается аналитику; после исправления нужен повторный аудит.")
         dev, test = False, False
         dev_note = "Начинать разработку нельзя: сначала устранить все FATAL-дефекты и пройти повторную проверку."
-        test_note = "Тест-дизайн по документу преждевременен: критерии приёмки изменятся после исправлений."
-    elif s < 85:
+        test_note = "Тест-дизайн преждевременен: критерии приёмки изменятся после исправления FATAL-дефектов."
+    elif s < 65:
+        status, gate = VerdictStatus.REJECTED, "SCORE"
+        rationale = f"Индекс готовности {s} < 65: слишком много дефектов MAJOR/MINOR. Требуется исправление и повторный аудит."
+        dev, test = False, False
+        dev_note = "Начинать разработку нельзя: сначала устранить дефекты P1 и пройти повторную проверку."
+        test_note = "Тест-дизайн преждевременен: требования будут существенно изменены."
+    elif s < 85 or unreviewed_ids:
         status = VerdictStatus.CONDITIONAL_PASS
-        rationale = f"FATAL-дефектов нет, индекс готовности {s} (65–85): допуск с оговорками."
+        gate = "UNREVIEWED_FATAL" if unreviewed_ids else "SCORE"
+        rationale = f"Подтверждённых FATAL-дефектов нет, индекс готовности {s}: допуск с оговорками."
+        if unreviewed_ids:
+            rationale += (f" Есть FATAL-находки без подтверждения Критиком ({', '.join(unreviewed_ids)}) — "
+                          "их нужно проверить вручную до начала разработки затронутых функций.")
         dev, test = True, False
         dev_note = "Можно начинать проектирование и каркас сервисов; MAJOR-дефекты закрыть в текущем спринте."
         test_note = "Тест-дизайн можно начинать; интеграционное тестирование — после закрытия MAJOR-дефектов."
     else:
         status = VerdictStatus.APPROVED
-        rationale = f"FATAL-дефектов нет, индекс готовности {s} ≥ 85: Definition of Ready пройден."
+        rationale = f"Подтверждённых FATAL-дефектов нет, индекс готовности {s} ≥ 85: Definition of Ready пройден."
         dev, test = True, True
         dev_note = "Документ можно передавать в разработку."
         test_note = "Документ можно передавать в тест-дизайн и тестирование."
     if preliminary and status == VerdictStatus.APPROVED:
         # Без семантических проверок (необходимость, корректность, противоречия) DoR не подтверждается.
         status = VerdictStatus.CONDITIONAL_PASS
-        rationale = (f"По детерминированным правилам FATAL-дефектов нет, индекс готовности {s} ≥ 85, однако без "
-                     "семантической проверки вердикт APPROVED не выдаётся.")
+        rationale = (f"По выполненным проверкам FATAL-дефектов нет, индекс готовности {s} ≥ 85, однако семантическая "
+                     "проверка выполнена не полностью, поэтому вердикт APPROVED не выдаётся.")
         dev, test = True, False
         dev_note = "Можно начинать проектирование; финальный допуск — после полного (LLM) аудита."
         test_note = "Тест-дизайн можно начинать; приёмочные критерии подтвердить после полного аудита."
     if preliminary:
-        rationale += (" Вердикт предварительный: в демо-режиме выполнены только детерминированные правила; "
-                      "семантические проверки (противоречия, пропуски, корректность) требуют LLM-прохода.")
+        rationale += (" Вердикт предварительный: семантические LLM-проверки выполнены не полностью "
+                      "(демо-режим или сбой проходов) — непроверенные критерии отмечены в отчёте.")
     return Verdict(status=status, can_start_development=dev, can_start_testing=test, rationale=rationale,
-                   development_note=dev_note, testing_note=test_note, is_preliminary=preliminary)
+                   development_note=dev_note, testing_note=test_note, is_preliminary=preliminary,
+                   blocking_defect_ids=[i for i in confirmed_ids if i != "?"], gate=gate)
 
 
 def assess_requirements(
-    requirements: list[Requirement], defects: list[Defect], hints: list[Hint], *, llm_checked: bool
+    requirements: list[Requirement], defects: list[Defect], hints: list[Hint], *,
+    llm_checked_ids: set[str] | None = None,
 ) -> list[RequirementAssessment]:
+    llm_checked_ids = llm_checked_ids or set()
     by_req: dict[str, list[Defect]] = defaultdict(list)
     for d in defects:
         if d.req_id:
@@ -113,6 +144,7 @@ def assess_requirements(
     for req in requirements:
         rdefs = by_req.get(req.req_id, [])
         rhints = hints_by_req.get(req.req_id, [])
+        llm_checked = req.req_id in llm_checked_ids
         checks: list[CriterionCheck] = []
         for c in SINGLE_CRITERIA:
             cdefs = [d for d in rdefs if d.rule_id.split("/")[0] == c.rule_id]
@@ -123,7 +155,7 @@ def assess_requirements(
                 continue
             if cdefs:
                 status, comment = CheckStatus.FAIL, "; ".join(f"[{d.severity}] {d.rule_id}" for d in cdefs)
-            elif chints:
+            elif chints and not llm_checked:
                 status, comment = CheckStatus.WARN, "; ".join(sorted({h.message for h in chints}))
             elif c.rules_coverage or llm_checked:
                 status, comment = CheckStatus.PASS, "Нарушений не выявлено" + ("" if llm_checked else " (правила)")
@@ -172,15 +204,27 @@ _SET_ACTIONS = {
 
 
 def build_remediation(defects: list[Defect]) -> list[RemediationItem]:
+    """P0: каждый FATAL — отдельный пункт; P1/P2: группы по правилу, самые массовые первыми."""
+    items: list[RemediationItem] = []
+    for d in defects:
+        if d.severity == Severity.FATAL:
+            where = d.req_id or "весь документ"
+            items.append(RemediationItem(priority="P0", action_item=f"[{d.rule_id}] {where}: {d.suggestion}",
+                                         target_defect_ids=[d.defect_id], business_impact=_IMPACT[Severity.FATAL]))
     groups: dict[str, list[Defect]] = defaultdict(list)
     for d in defects:
-        groups[d.rule_id].append(d)
+        if d.severity != Severity.FATAL:
+            groups[d.rule_id].append(d)
     ordered = sorted(groups.items(), key=lambda kv: (min(d.severity.rank for d in kv[1]), -len(kv[1]), kv[0]))
-    items: list[RemediationItem] = []
     for rule_id, ds in ordered:
         sev = min((d.severity for d in ds), key=lambda s: s.rank)
         pattern = PATTERNS_BY_CODE.get(rule_id)
-        action = _SET_ACTIONS.get(rule_id) or (pattern.suggestion if pattern else ds[0].suggestion)
+        action = _SET_ACTIONS.get(rule_id) or (pattern.suggestion if pattern else "")
+        if not action:  # LLM-находки: конкретные рекомендации из самих дефектов
+            uniq = list(dict.fromkeys(d.suggestion.strip() for d in ds if d.suggestion.strip()))
+            action = f"Критерий «{ds[0].criterion}»: " + " | ".join(u[:160] for u in uniq[:3])
+            if len(uniq) > 3:
+                action += f" | … и ещё {len(uniq) - 3}"
         reqs = sorted({d.req_id for d in ds if d.req_id})
         where = f" Затронуто требований: {len(reqs)} ({', '.join(reqs[:8])}{'…' if len(reqs) > 8 else ''})." if reqs else ""
         items.append(RemediationItem(priority=sev.priority, action_item=f"[{rule_id}] {action}{where}",
