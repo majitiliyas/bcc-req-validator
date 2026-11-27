@@ -1,6 +1,6 @@
 [project]
 name = "req-validator"
-version = "1.0.2"
+version = "1.1.0"
 description = "CLI-агент статической проверки требований (SRS/BRD) по ISO/IEC/IEEE 29148:2018 и IEEE Std 830-1998"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"
@@ -18,6 +18,9 @@ dependencies = [
     "jinja2>=3.1",
     "typst>=0.12",
     "openai>=1.60",
+    "fastapi>=0.115",
+    "uvicorn>=0.32",
+    "python-multipart>=0.0.18",
 ]
 
 [project.optional-dependencies]
@@ -27,7 +30,10 @@ ocr = ["rapidocr-onnxruntime>=1.4"]
 req-validator = "req_validator.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8.3"]
+dev = [
+    "httpx>=0.27",
+    "pytest>=8.3",
+]
 
 [build-system]
 requires = ["hatchling"]

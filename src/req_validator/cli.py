@@ -298,6 +298,30 @@ def doctor(
         raise typer.Exit(1)
 
 
+@app.command()
+def web(
+    host: Annotated[str, typer.Option("--host", help="Адрес сервера")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", help="Порт сервера")] = 8000,
+    open_browser: Annotated[bool, typer.Option("--open", help="Открыть страницу в браузере после запуска")] = False,
+) -> None:
+    """Запустить веб-интерфейс DAIEK с Бобом поверх того же ядра аудита."""
+    try:
+        import uvicorn
+
+        from .web.app import create_app
+    except ImportError as exc:  # зависимости веба не установлены
+        console.print(f"[red]Веб-интерфейс недоступен:[/red] {exc}. Выполните [bold]uv sync[/bold].")
+        raise typer.Exit(2) from exc
+    url = f"http://{host}:{port}"
+    console.print(f"DAIEK · Команда «ВУПИПАЙ» — веб-интерфейс: [bold]{url}[/bold] (остановить: Ctrl+C)")
+    if open_browser:
+        import threading
+        import webbrowser
+
+        threading.Timer(1.2, webbrowser.open, args=(url,)).start()
+    uvicorn.run(create_app(), host=host, port=port, log_level="warning")
+
+
 def main() -> None:
     app()
 

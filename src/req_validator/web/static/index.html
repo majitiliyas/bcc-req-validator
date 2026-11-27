@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DAIEK — AI-аудит требований · Команда «ВУПИПАЙ»</title>
+<link rel="icon" href="/static/brand/daiek_shield_logo_isolated.jpg">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="sky" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+
+<header class="top">
+  <a class="brand" href="/">
+    <span class="logo"><img src="/static/brand/daiek_logo_main.jpg" alt="Логотип DAIEK"></span>
+    <span class="brand-text"><b>DAIEK</b><small>AI-аудит требований до старта разработки</small></span>
+  </a>
+  <div class="top-right">
+    <span class="std">ISO/IEC/IEEE 29148 · IEEE 830</span>
+    <span class="team-badge"><span class="pie">🥧</span> Команда «ВУПИПАЙ» · BCC-HUB × MNU</span>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="left">
+    <div class="hero card">
+      <p class="eyebrow">Знакомьтесь, это Боб. И его новое ТЗ.</p>
+      <h1>Поймай баги в <span class="grad">требованиях</span>, пока они не стали багами в коде</h1>
+      <p class="lead">Каждое замечание — с дословной цитатой, ID требования и пунктом стандарта.
+        Цитаты сверяет RapidFuzz, спорное перепроверяет независимый Критик, а FATAL-гейт не даёт «натянуть» оценку.</p>
+
+      <div class="quick">
+        <button class="btn btn-gold" id="btn-case" type="button">⚡ Кейс БЦК (отчёт v1.0.2)</button>
+        <button class="btn btn-ghost" id="btn-flawed" type="button">🧪 Прогнать тестовое ТЗ с багами</button>
+      </div>
+
+      <label class="drop" id="drop" for="file">
+        <input type="file" id="file" accept=".md,.markdown,.txt,.pdf">
+        <span class="drop-icon">⬆</span>
+        <span class="drop-title">Перетащи ТЗ сюда или нажми, чтобы выбрать</span>
+        <span class="drop-sub">.md · .txt · .pdf — до 20 МБ. Пустой или битый файл тоже можно: DAIEK честно скажет, почему проверка невозможна.</span>
+      </label>
+
+      <div class="modes" role="radiogroup" aria-label="Режим проверки">
+        <label class="mode"><input type="radio" name="mode" value="demo" checked>
+          <span><b>Быстрый демо-аудит</b><small>по детерминированным правилам, ~1 сек, без сети</small></span></label>
+        <label class="mode"><input type="radio" name="mode" value="llm">
+          <span><b>Полный LLM-аудит</b><small>Pass 0–3 + ансамбль + Критик, 5–12 мин на бесплатных API</small></span></label>
+      </div>
+    </div>
+
+    <ol class="pipeline card" id="pipeline">
+      <li data-step="0"><span class="dot">1</span><b>Парсинг и PII-маска</b><small>кодировка, AST, маскирование ПДн</small></li>
+      <li data-step="1"><span class="dot">2</span><b>Сегментация</b><small>атомарные требования, стабильные REQ-ID</small></li>
+      <li data-step="2"><span class="dot">3</span><b>Аудит ISO 29148 &amp; Ансамбль</b><small>правила + Pass 1/2, две модели</small></li>
+      <li data-step="3"><span class="dot">4</span><b>Grounding Gate</b><small>каждая цитата сверяется с текстом</small></li>
+      <li data-step="4"><span class="dot">5</span><b>Критик &amp; FATAL Gate</b><small>чистый контекст, другая модель</small></li>
+    </ol>
+  </section>
+
+  <aside class="right">
+    <div class="bob card" id="bob" data-state="idle">
+      <div class="bob-frame">
+        <img class="bob-img on" id="bob-a" src="/static/bob/02_slide1_bob_intro.jpg" alt="Боб">
+        <img class="bob-img" id="bob-b" src="/static/bob/02_slide1_bob_intro.jpg" alt="">
+        <div class="stamp" id="stamp">FATAL GATE · REJECTED</div>
+      </div>
+      <div class="bubble">
+        <span class="who" id="bob-who">Боб</span>
+        <p id="bob-say">Скинули новое ТЗ? Закидывай в DAIEK — поймаем баги до старта спринта.</p>
+      </div>
+      <div class="bob-chip" id="bob-chip">Ожидание: «ТЗ готово». Реальность: проверим.</div>
+    </div>
+  </aside>
+</main>
+
+<section class="results" id="results" hidden>
+  <div class="verdict card" id="verdict"></div>
+  <div class="kpis" id="kpis"></div>
+
+  <div class="card tabs-card">
+    <nav class="tabs" role="tablist">
+      <button class="tab on" data-tab="defects" role="tab">Дефекты и правки</button>
+      <button class="tab" data-tab="funnel" role="tab">Воронка качества</button>
+      <button class="tab" data-tab="roi" role="tab">Бизнес-ценность (ROI)</button>
+      <button class="tab" data-tab="passport" role="tab">Паспорт прогона</button>
+      <span class="spacer"></span>
+      <span class="downloads" id="downloads"></span>
+    </nav>
+    <div class="pane on" id="pane-defects"></div>
+    <div class="pane" id="pane-funnel"></div>
+    <div class="pane" id="pane-roi"></div>
+    <div class="pane" id="pane-passport"></div>
+  </div>
+</section>
+
+<footer class="foot">
+  <span>DAIEK v{{VERSION}} · <b>Команда «ВУПИПАЙ»</b> · BCC-HUB × MNU FinTech Hackathon</span>
+  <span>ISO/IEC/IEEE 29148:2018 · IEEE Std 830-1998 · бюджет на API: $0</span>
+</footer>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
