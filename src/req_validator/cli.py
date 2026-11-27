@@ -106,15 +106,41 @@ def analyze(
         raise typer.Exit(1)
 
 
+def _openrouter_key_info(api_key: str) -> tuple[bool, str]:
+    """GET /api/v1/key: валиден ли ключ, бесплатный ли тариф, лимиты. Сам ключ не выводится."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request("https://openrouter.ai/api/v1/key", headers={"Authorization": f"Bearer {api_key}"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:  # noqa: S310 — фиксированный HTTPS-адрес провайдера
+            data = json.loads(resp.read().decode("utf-8")).get("data", {})
+    except urllib.error.HTTPError as exc:
+        return False, f"ключ отклонён: HTTP {exc.code}"
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{type(exc).__name__}: {str(exc)[:120]}"
+    parts = ["ключ принят", "бесплатный тариф" if data.get("is_free_tier") else "платный баланс"]
+    if data.get("limit") is not None:
+        parts.append(f"лимит {data.get('limit')}")
+    if data.get("usage") is not None:
+        parts.append(f"использовано {data.get('usage')}")
+    rl = data.get("rate_limit") or {}
+    if isinstance(rl.get("requests"), int) and rl["requests"] > 0:
+        parts.append(f"rate limit {rl['requests']}/{rl.get('interval', '')}")
+    return True, ", ".join(parts)
+
+
 async def _probe_models(settings: Settings) -> dict[str, tuple[bool, str]]:
-    """Онлайн-проверка: /models каждого провайдера с ключом; совпадают ли сконфигурированные slug'и."""
+    """Онлайн-проверка без расхода токенов: /models каждого провайдера с ключом и совпадение slug'ов из .env."""
+    import difflib
+
     from openai import AsyncOpenAI
 
     from .router import build_groups
 
     results: dict[str, tuple[bool, str]] = {}
     seen: dict[str, set[str] | str] = {}
-    for deps in build_groups(settings).values():
+    for deps in build_groups(settings, probe_local=True).values():
         for dep in deps:
             if dep.provider not in seen:
                 t0 = time.perf_counter()
@@ -122,15 +148,26 @@ async def _probe_models(settings: Settings) -> dict[str, tuple[bool, str]]:
                     client = AsyncOpenAI(api_key=dep.api_key or "ollama", base_url=dep.base_url, max_retries=0, timeout=15)
                     page = await client.models.list()
                     seen[dep.provider] = {m.id.removeprefix("models/") for m in page.data}
-                    results[f"{dep.provider} (/models)"] = (True, f"{len(seen[dep.provider])} моделей, "
+                    ids = seen[dep.provider]
+                    extra = ""
+                    if dep.provider == "openrouter":
+                        extra = f", из них :free — {sum(1 for i in ids if i.endswith(':free'))}"
+                    results[f"{dep.provider} (/models)"] = (True, f"{len(ids)} моделей{extra}, "
                                                                   f"{time.perf_counter() - t0:.1f} с")
                 except Exception as exc:  # noqa: BLE001
                     seen[dep.provider] = f"{type(exc).__name__}: {str(exc)[:120]}"
                     results[f"{dep.provider} (/models)"] = (False, str(seen[dep.provider]))
+                if dep.provider == "openrouter" and dep.api_key:
+                    results["openrouter (/key)"] = await asyncio.to_thread(_openrouter_key_info, dep.api_key)
             ids = seen[dep.provider]
             if isinstance(ids, set):
                 ok = dep.model in ids or dep.model.removeprefix("models/") in ids
-                results[dep.name] = (ok, "slug найден" if ok else "slug НЕ найден в /models — проверьте имя в .env")
+                if ok:
+                    results[dep.name] = (True, "slug найден")
+                else:
+                    near = difflib.get_close_matches(dep.model, sorted(ids), n=3, cutoff=0.5)
+                    hint = f"; похожие: {', '.join(near)}" if near else ""
+                    results[dep.name] = (False, f"slug НЕ найден в /models — исправьте в .env{hint}")
     return results
 
 

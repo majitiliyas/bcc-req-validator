@@ -96,6 +96,18 @@ uv run req-validator analyze path/to/requirements.md --out reports/report.md --d
 | `deep` | Pass 0, Pass 2, Критик, длинный контекст | `gemini/gemini-4-hydrogen` → `gemini/gemini-3.8-flash` → `gemini/gemini-3.5-flash-lite` → NVIDIA NIM (`nemotron-3-ultra-550b-a55b`, `deepseek-v4.1-flash`) → `openrouter/openrouter/free` → `ollama/qwen3.5:9b` |
 | `fast` | Pass 1 (батчи), ремонт цитат | `groq/qwen/qwen3.8-27b` → `groq/openai/gpt-oss-120b` → `gemini/gemini-3.5-flash-lite` → группа `deep` |
 
+### Без Groq и NVIDIA: Gemini + OpenRouter free + Ollama
+
+Ключи `GROQ_API_KEY` и `NVIDIA_API_KEY` необязательны: провайдеры без ключа (или с пустым значением `""`) пропускаются. Минимальный `.env`:
+
+```env
+GEMINI_API_KEY="..."
+OPENROUTER_API_KEY="..."
+OLLAMA_BASE_URL="http://localhost:11434"
+```
+
+Тогда `fast` = `gemini/gemini-3.5-flash-lite` → группа `deep`, а `deep` = Gemini → `openrouter/openrouter/free` → `ollama/qwen3.5:9b`. Подойдёт и конкретная бесплатная модель OpenRouter (`openrouter/<slug>:free`). `OLLAMA_BASE_URL` можно указывать с `/v1` или без. Ollama включается в маршрут, только если отвечает. Локальная модель получает отдельный таймаут (`OLLAMA_TIMEOUT_S`, 600 с) и обрабатывает запросы по одному. Окно контекста задаётся в `OLLAMA_CONTEXT_WINDOW` (32 768) и должно совпадать с `OLLAMA_CONTEXT_LENGTH` сервера Ollama. Бесплатные модели OpenRouter и Ollama работают в режиме `json_object`; если модель его не поддерживает, схема передаётся только в промпте, а ответ проверяет Pydantic.
+
 Надёжность роутера:
 
 * Встроенные ретраи SDK отключены (`max_retries=0`), все повторы делает роутер.

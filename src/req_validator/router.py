@@ -21,7 +21,7 @@ import random
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from .cache import canonical_json, sha256_hex
@@ -40,18 +40,25 @@ class ProviderSpec:
     context_window: int
     tpm_limit: int | None = None
     max_input_tokens: int | None = None
-    json_mode: str = "json_schema"
+    json_mode: str = "json_schema"  # json_schema → json_object → prompt (понижается при отказе провайдера)
+    max_concurrency: int | None = None  # одновременных запросов к деплойменту (локальная модель — 1)
 
 
 PROVIDERS: dict[str, ProviderSpec] = {
     "gemini": ProviderSpec("https://generativelanguage.googleapis.com/v1beta/openai/", "gemini_api_key", rpm=10,
                            context_window=1_000_000),
     "nvidia": ProviderSpec("https://integrate.api.nvidia.com/v1", "nvidia_api_key", rpm=40, context_window=128_000),
-    "openrouter": ProviderSpec("https://openrouter.ai/api/v1", "openrouter_api_key", rpm=20, context_window=64_000),
+    # openrouter/free и *:free маршрутизируются на разные бесплатные модели — json_schema поддерживают не все.
+    "openrouter": ProviderSpec("https://openrouter.ai/api/v1", "openrouter_api_key", rpm=20, context_window=64_000,
+                               json_mode="json_object"),
     "groq": ProviderSpec("https://api.groq.com/openai/v1", "groq_api_key", rpm=30, context_window=128_000,
                          tpm_limit=8_000, max_input_tokens=5_500),
-    "ollama": ProviderSpec("http://localhost:11434/v1", None, rpm=None, context_window=32_000, json_mode="json_object"),
+    "ollama": ProviderSpec("http://localhost:11434/v1", None, rpm=None, context_window=32_768, json_mode="json_object",
+                           max_concurrency=1),
 }
+
+
+JSON_MODE_FALLBACK = {"json_schema": "json_object", "json_object": "prompt"}
 
 
 # --------------------------------------------------------------------------- #
@@ -119,18 +126,26 @@ class Deployment:
     api_key: str | None
     base_url: str
     json_mode: str = "json_schema"
+    timeout: float = 120.0
     fails: int = 0
     cooldown_until: float = 0.0
     disabled_reason: str | None = None
     _tpm: deque[tuple[float, int]] = field(default_factory=deque)
     _next_slot: float = 0.0
     _lock: asyncio.Lock | None = None
+    _sem: asyncio.Semaphore | None = None
 
     @property
     def lock(self) -> asyncio.Lock:
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
+
+    @property
+    def semaphore(self) -> asyncio.Semaphore | None:
+        if self.spec.max_concurrency and self._sem is None:
+            self._sem = asyncio.Semaphore(self.spec.max_concurrency)
+        return self._sem
 
     def available(self, now: float) -> bool:
         return self.disabled_reason is None and now >= self.cooldown_until
@@ -156,18 +171,20 @@ def parse_deployment(spec_str: str, settings: Settings) -> Deployment | None:
         key = secret.get_secret_value().strip() if secret is not None else ""
         if not key or key.startswith(("your_", "optional_")):
             return None
-    base_url = settings.ollama_base_url if provider == "ollama" else spec.base_url
+    base_url, timeout = spec.base_url, settings.llm_timeout_s
+    if provider == "ollama":
+        base_url, timeout = settings.ollama_openai_url, settings.ollama_timeout_s
+        spec = replace(spec, context_window=settings.ollama_context_window)
     return Deployment(name=spec_str.strip(), provider=provider, model=model, spec=spec, api_key=key,
-                      base_url=base_url, json_mode=spec.json_mode)
+                      base_url=base_url, json_mode=spec.json_mode, timeout=timeout)
 
 
 def ollama_reachable(settings: Settings, timeout: float = 0.7) -> bool:
     """Быстрая проверка локального Ollama (только адрес из настроек, по умолчанию localhost)."""
     import urllib.request
 
-    base = settings.ollama_base_url.rstrip("/").removesuffix("/v1")
     try:
-        with urllib.request.urlopen(f"{base}/api/tags", timeout=timeout) as resp:  # noqa: S310
+        with urllib.request.urlopen(f"{settings.ollama_native_url}/api/tags", timeout=timeout) as resp:  # noqa: S310
             return resp.status == 200
     except Exception:  # noqa: BLE001
         return False
@@ -219,12 +236,12 @@ class OpenAICompatTransport:
     def client(self, dep: Deployment) -> Any:
         from openai import AsyncOpenAI
 
-        key = f"{dep.provider}|{dep.base_url}"
+        key = f"{dep.provider}|{dep.base_url}|{dep.timeout}"
         if key not in self._clients:
             self._clients[key] = AsyncOpenAI(
                 api_key=dep.api_key or "ollama", base_url=dep.base_url,
                 max_retries=self.settings.sdk_max_retries,  # = 0: никаких скрытых повторов
-                timeout=self.settings.llm_timeout_s,
+                timeout=dep.timeout,
             )
         return self._clients[key]
 
@@ -239,14 +256,16 @@ class OpenAICompatTransport:
                 kwargs["response_format"] = {"type": "json_schema", "json_schema": {
                     "name": req.schema_name, "schema": req.json_schema, "strict": False}}
             else:
-                kwargs["response_format"] = {"type": "json_object"}
+                if dep.json_mode == "json_object":
+                    kwargs["response_format"] = {"type": "json_object"}
+                # json_object и prompt: схема передаётся в промпте, ответ валидирует Pydantic
                 schema_hint = ("Верни только JSON-объект, строго соответствующий JSON Schema:\n"
                                + canonical_json(req.json_schema))
                 kwargs["messages"] = [*req.messages, {"role": "system", "content": schema_hint}]
         try:
             resp = await self.client(dep).chat.completions.create(**kwargs)
         except openai.APITimeoutError as exc:
-            raise ProviderError("timeout", f"таймаут {self.settings.llm_timeout_s} с") from exc
+            raise ProviderError("timeout", f"таймаут {dep.timeout:.0f} с") from exc
         except openai.APIConnectionError as exc:
             raise ProviderError("network", f"нет соединения: {exc}") from exc
         except openai.APIStatusError as exc:
@@ -259,14 +278,19 @@ class OpenAICompatTransport:
                 raise ProviderError("auth", body, status=status) from exc
             if status == 404:
                 raise ProviderError("not_found", body, status=status) from exc
-            if status in (400, 422) and req.json_schema is not None and any(
-                    w in body.lower() for w in ("response_format", "json_schema", "schema", "structured")):
+            if status in (400, 422) and req.json_schema is not None and dep.json_mode != "prompt" and any(
+                    w in body.lower() for w in ("response_format", "json_schema", "json_object", "json mode",
+                                                "schema", "structured")):
                 raise ProviderError("json_mode", body, status=status) from exc
             if status >= 500:
                 raise ProviderError("server", body, status=status, retry_after=_retry_after_seconds(headers)) from exc
             raise ProviderError("bad_request", body, status=status) from exc
-        choice = resp.choices[0] if resp.choices else None
-        text = (choice.message.content if choice and choice.message else "") or ""
+        if not getattr(resp, "choices", None):
+            # OpenRouter и др. иногда возвращают 200 с {"error": …} без choices — это сбой апстрима, не ответ.
+            err = getattr(resp, "error", None) or getattr(resp, "model_extra", {}).get("error") if resp else None
+            raise ProviderError("server", f"пустой ответ провайдера: {str(err)[:200] if err else 'нет choices'}")
+        choice = resp.choices[0]
+        text = (choice.message.content if choice.message else "") or ""
         usage = getattr(resp, "usage", None)
         pt = getattr(usage, "prompt_tokens", None) or estimate_tokens(req.text)
         ct = getattr(usage, "completion_tokens", None) or estimate_tokens(text)
@@ -417,12 +441,19 @@ class LLMRouter:
             self.stats.attempts += 1
             t0 = self.clock()
             try:
-                resp = await self.transport(dep, req)
+                sem = dep.semaphore
+                if sem is not None:
+                    async with sem:
+                        resp = await self.transport(dep, req)
+                else:
+                    resp = await self.transport(dep, req)
             except ProviderError as err:
                 self._trace("llm_error", deployment=dep.name, step=req.step, kind=err.kind, status=err.status,
                             retry_after=err.retry_after, attempt=attempt)
-                if err.kind == "json_mode" and dep.json_mode == "json_schema":
-                    dep.json_mode = "json_object"  # провайдер не умеет json_schema — схема пойдёт в промпте
+                if err.kind == "json_mode" and dep.json_mode in JSON_MODE_FALLBACK:
+                    # провайдер не поддерживает режим: json_schema → json_object → схема только в промпте
+                    dep.json_mode = JSON_MODE_FALLBACK[dep.json_mode]
+                    self._trace("json_mode_downgrade", deployment=dep.name, mode=dep.json_mode)
                     continue
                 if err.kind in ("auth", "not_found", "bad_request", "json_mode"):
                     dep.disabled_reason = f"{err.kind} {err.status or ''}".strip()

@@ -105,8 +105,9 @@ def test_cli_empty_file_still_writes_report(tmp_path: Path, monkeypatch) -> None
 
 def test_cli_requires_key_without_demo(fixtures: Path, tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
-    for var in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY"):
+    for var in ("GEMINI_API_KEY", "GROQ_API_KEY", "OPENROUTER_API_KEY", "NVIDIA_API_KEY"):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("ENABLE_OLLAMA", "false")  # не зависим от локально запущенного Ollama
     result = CliRunner().invoke(app, ["analyze", str(fixtures / "clean_srs.md"), "--out", str(tmp_path / "r.md")])
     assert result.exit_code == 2
     assert "--demo" in result.output

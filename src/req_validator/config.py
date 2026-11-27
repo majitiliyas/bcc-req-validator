@@ -29,7 +29,11 @@ class Settings(BaseSettings):
     fast_models: str = DEFAULT_FAST_MODELS
     enable_ollama: bool = True
     ollama_model: str = "qwen3.5:9b"
-    ollama_base_url: str = "http://localhost:11434/v1"
+    ollama_base_url: str = Field(default="http://localhost:11434",
+                                 description="Адрес Ollama; допускается с /v1 и без — нормализуется")
+    ollama_timeout_s: float = Field(default=600.0, gt=0, description="Локальная модель на CPU/GPU ноутбука медленнее облака")
+    ollama_context_window: int = Field(default=32_768, ge=2_048,
+                                       description="Должен совпадать с OLLAMA_CONTEXT_LENGTH / num_ctx сервера")
 
     # --- надёжность роутера ---
     sdk_max_retries: int = Field(default=0, ge=0, le=0, description="Встроенные ретраи SDK отключены")
@@ -62,6 +66,16 @@ class Settings(BaseSettings):
     use_cache: bool = True
     citation_threshold: float = Field(default=85.0, ge=50, le=100)
     enable_ocr: bool = True
+
+    @property
+    def ollama_native_url(self) -> str:
+        """Нативный API Ollama (/api/tags…): без завершающего / и /v1."""
+        return self.ollama_base_url.strip().rstrip("/").removesuffix("/v1").rstrip("/")
+
+    @property
+    def ollama_openai_url(self) -> str:
+        """OpenAI-совместимый endpoint Ollama — всегда с /v1."""
+        return self.ollama_native_url + "/v1"
 
     @property
     def cache_db(self) -> Path:
