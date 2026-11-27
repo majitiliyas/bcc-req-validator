@@ -8,6 +8,7 @@
   --mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
 }
 * { box-sizing: border-box; }
+[hidden] { display: none !important; } /* иначе .results {display:flex} показывает старый отчёт во время нового прогона */
 html, body { margin: 0; }
 body {
   font-family: var(--font); color: var(--text); background: radial-gradient(1200px 700px at 85% -10%, #2a1a6e 0%, transparent 60%),

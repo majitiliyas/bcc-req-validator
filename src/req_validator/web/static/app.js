@@ -49,7 +49,8 @@
       const [img, line] = STAGE_LINES[i];
       bobSet("processing", img, "Голос за кадром", line, `Этап ${i + 1} из 5: ${steps[i].querySelector("b").textContent}`);
       i += 1;
-      anim = setTimeout(tick, i === steps.length ? stepMs * 1.4 : stepMs);
+      // последний этап остаётся «в работе», пока не пришёл ответ сервера: никаких зелёных галочек над пустым экраном
+      if (i < steps.length) anim = setTimeout(tick, stepMs);
     };
     tick();
     return { stop: () => { clearTimeout(anim); anim = null; } };
@@ -69,13 +70,28 @@
   const setBusy = (b) => { busyEls.forEach((x) => (x.disabled = b)); $("#drop").style.pointerEvents = b ? "none" : ""; };
   const mode = () => $('input[name="mode"]:checked').value;
 
-  async function run(kind, file) {
-    setBusy(true);
-    $("#results").hidden = true;
-    const llm = kind === "upload" && mode() === "llm";
-    const p = pipeRun(kind === "case" ? 520 : llm ? 9000 : 380);
-    const started = Date.now();
-    let res;
+  const fmtTime = (sec) => `${Math.floor(sec / 60)}:${String(Math.floor(sec % 60)).padStart(2, "0")}`;
+  let shownStage = -1;
+  function pipeStage(idx, j) {
+    steps.forEach((s, i) => {
+      s.classList.remove("run", "done", "skip");
+      if (i < idx) s.classList.add("done");
+      if (i === idx) s.classList.add("run");
+    });
+    const [img, line] = STAGE_LINES[idx];
+    const chip = `⏱ ${fmtTime(j.running_s || 0)} · вызовов LLM: ${j.calls || 0}${j.note ? " · " + j.note : ""}`;
+    if (idx !== shownStage) { bobSet("processing", img, "Голос за кадром", line, chip); shownStage = idx; }
+    else bob.chip.textContent = chip;
+  }
+  function pipeQueued(j) {
+    pipeReset();
+    shownStage = -1;
+    bobSet("processing", "04_slide3_bob_overwhelmed_tz.jpg", "Голос за кадром",
+      `Боб, ты не один: впереди ещё ${j.ahead} полн. аудит(а). Бесплатные квоты не любят толпу — прогоны идут по одному.`,
+      `⏱ в очереди ${fmtTime(j.elapsed_s || 0)}`);
+  }
+
+  async function post(kind, file) {
     try {
       let r;
       if (kind === "case") r = await fetch("/api/case");
@@ -86,16 +102,50 @@
         fd.append("mode", mode());
         r = await fetch("/api/analyze", { method: "POST", body: fd });
       }
-      res = await r.json();
+      if (!r.ok) return { ok: false, error: `Сервер ответил HTTP ${r.status}.`, hint: "Повторите проверку." };
+      return await r.json();
     } catch (e) {
-      res = { ok: false, error: "Сервер не ответил.", hint: "Проверьте, что `req-validator web` запущен." };
+      return { ok: false, error: "Сервер не ответил.", hint: "Проверьте, что `req-validator web` запущен." };
     }
-    const minShow = kind === "case" ? 2900 : 2200; // дать пайплайну «доиграть», чтобы жюри увидело этапы
-    const wait = minShow - (Date.now() - started);
-    if (wait > 0) await sleep(wait);
-    p.stop();
+  }
+
+  async function pollJob(key) {
+    let fails = 0;
+    pipeStage(0, { running_s: 0, calls: 0, note: "задача поставлена в очередь" });
+    for (;;) {
+      await sleep(2000);
+      let j;
+      try {
+        j = await (await fetch(`/api/jobs/${key}`)).json();
+        fails = 0;
+      } catch (e) {
+        if (++fails > 5) return { ok: false, error: "Связь с сервером потеряна во время полного LLM-аудита.", hint: "Перезапустите проверку." };
+        continue;
+      }
+      if (!j.ok || j.status === "done") return j;
+      if (j.status === "queued") pipeQueued(j);
+      else pipeStage(j.stage, j);
+    }
+  }
+
+  async function run(kind, file) {
+    setBusy(true);
+    $("#results").hidden = true;
+    const llm = kind === "upload" && mode() === "llm";
+    const p = llm ? null : pipeRun(kind === "case" ? 520 : 380);
+    if (llm) pipeStage(0, { running_s: 0, calls: 0, note: "загружаем файл" });
+    const started = Date.now();
+    let res = await post(kind, file);
+    if (res.ok && res.job) res = await pollJob(res.job);  // полный LLM-аудит: реальный прогресс по трейсу
+    if (p) {
+      const wait = (kind === "case" ? 2900 : 2200) - (Date.now() - started); // дать жюри увидеть этапы
+      if (wait > 0) await sleep(wait);
+      p.stop();
+    }
+    shownStage = -1;
     setBusy(false);
     if (!res.ok) return showError(res);
+    if (!res.view || !res.view.verdict) return showError({ ok: false, error: "Сервер вернул ответ без отчёта.", hint: "Повторите проверку." });
     pipeFinish(res.view);
     render(res.view);
   }
@@ -156,7 +206,10 @@
     } else {
       bobSet("pass", "07_slide6_bob_happy_savings.jpg", "Боб",
         s === "APPROVED" ? "Ты не поверишь: это ТЗ можно отдавать в разработку. Спринт стартует без мин."
-                         : "Почти идеально: осталась пара замечаний — поправь их, и в спринт.",
+          : !v.defects.length && v.verdict.preliminary
+            ? "Ожидание: «где-то тут подвох». Реальность: правила не нашли ни одного дефекта. Но это демо — смысл проверит полный LLM-аудит, только тогда APPROVED."
+            : !v.defects.length ? "Дефектов нет, но вердикт условный — загляни в обоснование."
+            : `Почти идеально: ${v.defects.length} замеч. без FATAL — поправь их, и в спринт.`,
         `Индекс готовности ${nf(m.readiness_score, 1)} / 100 · FATAL ${m.fatal_count}.`);
     }
   }
@@ -183,7 +236,13 @@
     const g = $(".gauge", el);
     requestAnimationFrame(() => animateGauge(g, score));
   }
+  // rAF не тикает во фоновой вкладке (длинный LLM-аудит часто заканчивается, пока пользователь в другом окне):
+  // без страховки счётчики и индекс навсегда застревают на нуле. Поэтому финальное значение ставится таймером.
+  const settle = (fn) => { if (document.hidden) fn(); else setTimeout(fn, 1500); };
   function animateGauge(g, target) {
+    const final = () => { g.style.setProperty("--v", target); g.querySelector("span").innerHTML = `${nf(target, 1)}<small>из 100</small>`; };
+    settle(final);
+    if (document.hidden) return;
     const t0 = performance.now();
     const step = (t) => {
       const k = Math.min(1, (t - t0) / 1200), e = 1 - Math.pow(1 - k, 3), val = target * e;
@@ -215,6 +274,8 @@
     const raw = el.dataset.count;
     if (!/^-?\d+(\.\d+)?$/.test(raw)) { el.textContent = raw; return; }
     const target = Number(raw), t0 = performance.now();
+    settle(() => (el.textContent = nf(target)));
+    if (document.hidden) return;
     const step = (t) => {
       const k = Math.min(1, (t - t0) / 900), e = 1 - Math.pow(1 - k, 3);
       el.textContent = nf(Math.round(target * e));

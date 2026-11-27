@@ -114,3 +114,163 @@ def test_missing_file_and_bad_download_paths(client: TestClient) -> None:
 def test_health_reports_version_and_team(client: TestClient) -> None:
     h = client.get("/api/health").json()
     assert h["ok"] and h["team"] == "Команда «ВУПИПАЙ»" and h["llm_available"] is False
+
+
+# --------------------------------------------------------------------------- #
+# Полный LLM-аудит: фоновая задача + опрос прогресса (регрессия «этапы зелёные, а результатов нет»)
+# --------------------------------------------------------------------------- #
+
+import json  # noqa: E402
+import threading  # noqa: E402
+import time  # noqa: E402
+
+from pydantic import SecretStr  # noqa: E402
+
+import req_validator.web.app as web_app  # noqa: E402
+from req_validator.analyzer import run_audit as real_run_audit  # noqa: E402
+
+
+@pytest.fixture
+def llm_client(tmp_path: Path) -> TestClient:
+    settings = Settings(_env_file=None, cache_dir=tmp_path / ".cache", gemini_api_key=SecretStr("test-key"),
+                        nvidia_api_key=None, groq_api_key=None, openrouter_api_key=None, enable_ollama=False)
+    return TestClient(create_app(settings, runs_dir=tmp_path / "runs"))
+
+
+def _poll(client: TestClient, key: str, timeout: float = 20.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        body = client.get(f"/api/jobs/{key}").json()
+        if body["status"] in ("done", "error"):
+            return body
+        time.sleep(0.05)
+    raise AssertionError("задача не завершилась")
+
+
+def _upload_llm(client: TestClient, name: str = "flawed.md", data: bytes | None = None) -> dict:
+    data = (FIXTURES / "flawed_fintech_srs.md").read_bytes() if data is None else data
+    return client.post("/api/analyze", files={"file": (name, data, "text/markdown")}, data={"mode": "llm"}).json()
+
+
+def test_llm_mode_returns_job_immediately_and_result_via_polling(llm_client: TestClient, monkeypatch) -> None:
+    gate = threading.Event()
+
+    def slow_audit(path, *, demo, settings):  # реальный пайплайн без сети, но «долгий», как бесплатные API
+        assert demo is False
+        gate.wait(5)
+        return real_run_audit(path, demo=True, settings=settings)
+
+    monkeypatch.setattr(web_app, "run_audit", slow_audit)
+    t0 = time.time()
+    body = _upload_llm(llm_client)
+    assert time.time() - t0 < 3, "POST не должен ждать окончания LLM-аудита"
+    assert body["ok"] and "view" not in body and len(body["job"]) == 32
+    running = llm_client.get(f"/api/jobs/{body['job']}").json()
+    assert running["ok"] and running["status"] in ("queued", "running") and "view" not in running
+    assert {"stage", "calls", "note", "elapsed_s", "running_s"} <= running.keys()
+    gate.set()
+    done = _poll(llm_client, body["job"])
+    assert done["ok"] and done["status"] == "done"
+    v = done["view"]
+    assert v["verdict"]["status"] in ("REJECTED", "CONDITIONAL_PASS", "APPROVED") and v["defects"]
+    assert llm_client.get(v["downloads"]["pdf"]).content.startswith(b"%PDF")
+
+
+def test_second_llm_job_waits_in_visible_queue(llm_client: TestClient, monkeypatch) -> None:
+    gate = threading.Event()
+
+    def held_audit(path, *, demo, settings):
+        gate.wait(5)
+        return real_run_audit(path, demo=True, settings=settings)
+
+    monkeypatch.setattr(web_app, "run_audit", held_audit)
+    first = _upload_llm(llm_client)["job"]
+    second = _upload_llm(llm_client)["job"]
+    time.sleep(0.2)
+    s2 = llm_client.get(f"/api/jobs/{second}").json()
+    assert s2["status"] == "queued" and s2["ahead"] == 1
+    gate.set()
+    assert _poll(llm_client, first)["status"] == "done"
+    assert _poll(llm_client, second)["status"] == "done"
+
+
+def test_unreadable_file_in_llm_mode_skips_queue(llm_client: TestClient, monkeypatch) -> None:
+    gate = threading.Event()
+    calls: list[bool] = []
+
+    def held_audit(path, *, demo, settings):
+        calls.append(demo)
+        if len(calls) == 1:
+            gate.wait(5)
+        return real_run_audit(path, demo=True, settings=settings)
+
+    monkeypatch.setattr(web_app, "run_audit", held_audit)
+    busy = _upload_llm(llm_client)["job"]  # занимает очередь LLM
+    time.sleep(0.1)
+    t0 = time.time()
+    body = _upload_llm(llm_client, "empty.md", b"")
+    assert time.time() - t0 < 3 and body["ok"] and "job" not in body
+    assert body["view"]["verdict"]["status"] == "CANNOT_PROCEED"
+    gate.set()
+    _poll(llm_client, busy)
+
+
+def test_llm_job_failure_is_reported_not_silent(llm_client: TestClient, monkeypatch) -> None:
+    def boom(path, *, demo, settings):
+        raise RuntimeError("квота исчерпана")
+
+    monkeypatch.setattr(web_app, "run_audit", boom)
+    body = _poll(llm_client, _upload_llm(llm_client)["job"])
+    assert body["ok"] is False and body["status"] == "error" and "квота исчерпана" in body["error"]
+
+
+def test_unknown_job_is_friendly(llm_client: TestClient) -> None:
+    for key in ("0" * 32, "not-a-key"):
+        body = llm_client.get(f"/api/jobs/{key}").json()
+        assert body["ok"] is False and "Задача не найдена" in body["error"]
+
+
+def test_progress_stage_mapping_from_core_trace() -> None:
+    from req_validator.web.app import _stage_of
+
+    assert _stage_of({"event": "ingest"}) == 0
+    assert _stage_of({"event": "llm_call", "step": "pass0:0"}) == 1
+    assert _stage_of({"event": "llm_call", "step": "pass2:all"}) == 2
+    assert _stage_of({"event": "pass2_ensemble"}) == 3
+    assert _stage_of({"event": "empty_response", "step": "critic:04b2"}) == 4
+
+
+def test_frontend_polls_jobs_and_keeps_last_stage_running() -> None:
+    js = (Path(web_app.STATIC) / "app.js").read_text(encoding="utf-8")
+    assert "/api/jobs/" in js and "pollJob" in js
+    assert "if (i < steps.length) anim = setTimeout(tick, stepMs);" in js  # анимация не «закрывает» последний этап
+
+
+def test_job_progress_sticks_to_its_own_trace(tmp_path: Path) -> None:
+    """Регрессия: параллельный CLI или второй сервер с тем же файлом не должен «перехватывать» прогресс задачи."""
+    from req_validator.web.app import find_trace
+
+    def write(stamp: str, sha8: str) -> Path:
+        f = tmp_path / f"run_{stamp}.jsonl"
+        f.write_text(json.dumps({"event": "ingest", "run_id": f"{stamp}-{sha8}"}) + "\n", encoding="utf-8")
+        return f
+
+    started = time.mktime(time.strptime("20261127T195353", "%Y%m%dT%H%M%S"))
+    write("20261127T193532", "8274dd4e")  # чужой прогон того же файла, начатый раньше задачи
+    own = write("20261127T195353", "8274dd4e")
+    write("20261127T195400", "aaaaaaaa")  # другой документ
+    write("20261127T195736", "8274dd4e")  # чужой прогон того же файла, начатый позже
+    assert find_trace(tmp_path, started, "8274dd4e") == own
+    assert find_trace(tmp_path, started, "deadbeef") is None
+
+
+def test_frontend_regressions_from_crash_test() -> None:
+    static = Path(web_app.STATIC)
+    css = (static / "app.css").read_text(encoding="utf-8")
+    js = (static / "app.js").read_text(encoding="utf-8")
+    # .results {display:flex} перебивал атрибут hidden: во время нового прогона висел старый отчёт
+    assert "[hidden] { display: none !important; }" in css
+    # счётчики KPI и индекс не должны застревать на нуле, если ответ пришёл во фоновой вкладке
+    assert "document.hidden" in js and "settle(" in js
+    # чистое демо-ТЗ без дефектов не должно получать реплику про «пару замечаний»
+    assert "правила не нашли ни одного дефекта" in js
