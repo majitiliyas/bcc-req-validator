@@ -41,16 +41,29 @@ from .models import (
     Hint,
     PassStatus,
     Requirement,
+    RequirementKind,
     ReviewStatus,
     Severity,
 )
 from .pii import PiiMasker
-from .prompts import CRITIC, PASS0_REGISTRY, PASS1_AUDIT, PASS2_HOLISTIC, QUOTE_REPAIR, PromptTemplate, spotlight
+from .prompts import (
+    CRITIC,
+    PASS0_REGISTRY,
+    PASS1_AUDIT,
+    PASS1_NEGATIVE_EXAMPLES,
+    PASS2_CONTRACT_CHECKS,
+    PASS2_HOLISTIC,
+    QUOTE_REPAIR,
+    PromptTemplate,
+    spotlight,
+)
 from .router import AllDeploymentsFailedError, ChatRequest, LLMRouter
 from .standards import FINTECH_CHECKLIST, SET_CRITERIA, SINGLE_CRITERIA, catalog_text, criterion_of, norm_text
 
 T = TypeVar("T", bound=BaseModel)
 PASS0_CHUNK_TOKENS = 60_000
+BLOCK_CHUNK_TOKENS = 2_500  # Pass 0: компактные блоки при битом JSON
+PASS2_BLOCK_TOKENS = 3_500  # Pass 2: блоки по разделам при пустом/битом ответе
 RISK_BY_SEVERITY = {
     Severity.FATAL: "Риск остановки разработки, финансовых или регуляторных потерь.",
     Severity.MAJOR: "Риск разночтений между бизнесом, разработкой и QA; переделки на тестировании.",
@@ -120,29 +133,52 @@ async def structured_call(
                 ctx.trace("cache_stale", step=step, key=key[:16])
 
     system, user = prompt.render(**values)
-    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    last_error = ""
-    for attempt in range(1 + ctx.settings.max_validation_retries):
-        req = ChatRequest(messages=list(messages), json_schema=api_schema(schema), schema_name=schema.__name__,
-                          max_tokens=ctx.settings.max_output_tokens, step=step)
-        resp = await ctx.router.complete(group, req, prefer_not=prefer_not)
-        ctx.llm_calls += 1
-        try:
-            obj = schema.model_validate(json.loads(extract_json_text(resp.text)))
-        except (json.JSONDecodeError, ValidationError) as exc:
-            last_error = str(exc)[:1500]
-            ctx.trace("validation_error", step=step, attempt=attempt, model=resp.model, error=last_error[:300])
-            messages += [
-                {"role": "assistant", "content": resp.text[:6000]},
-                {"role": "user", "content": "Ответ не прошёл валидацию JSON-схемы:\n" + last_error
-                 + "\nВерни исправленный JSON-объект строго по схеме, без пояснений."},
-            ]
-            continue
-        ctx.cache.put(key, step_name=step, prompt_hash=prompt.hash, schema_hash=s_hash, model=resp.model,
-                      payload=obj.model_dump(mode="json"), prompt_tokens=resp.prompt_tokens,
-                      completion_tokens=resp.completion_tokens)
-        return obj, resp.model, False
-    raise StructuredCallError(f"{step}: ответ модели не прошёл валидацию после ретраев: {last_error[:200]}")
+    base_messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    schema_json = api_schema(schema)
+    excluded: set[str] = set()
+    errors: list[str] = []
+    retries = ctx.settings.max_validation_retries
+    while True:
+        # Новая модель цепочки начинает с чистого диалога; ретраи валидации — на той же модели (pin).
+        messages = list(base_messages)
+        model: str | None = None
+        last_error = ""
+        for attempt in range(1 + retries):
+            req = ChatRequest(messages=list(messages), json_schema=schema_json, schema_name=schema.__name__,
+                              max_tokens=ctx.settings.max_output_tokens, step=step)
+            try:
+                resp = await ctx.router.complete(group, req, prefer_not=prefer_not, exclude=excluded, pin=model)
+            except AllDeploymentsFailedError as exc:
+                if model is None:  # в цепочке не осталось моделей
+                    detail = "; ".join(errors[-3:]) or str(exc)[:200]
+                    raise StructuredCallError(f"{step}: все модели цепочки исчерпаны: {detail}") from exc
+                errors.append(f"{model}: недоступна при ретрае ({str(exc)[:80]})")
+                break  # закреплённая модель недоступна — следующая модель
+            ctx.llm_calls += 1
+            model = resp.model
+            try:
+                obj = schema.model_validate(json.loads(extract_json_text(resp.text)))
+            except (json.JSONDecodeError, ValidationError) as exc:
+                last_error = str(exc)[:1500]
+                ctx.trace("validation_error", step=step, attempt=attempt, model=resp.model, error=last_error[:300])
+                messages += [
+                    {"role": "assistant", "content": resp.text[:6000]},
+                    {"role": "user", "content": "Ответ не прошёл валидацию JSON-схемы:\n" + last_error
+                     + "\nВерни исправленный JSON-объект строго по схеме, без пояснений. "
+                       "Двойные кавычки внутри строк экранируй как \\\" или заменяй на «»."},
+                ]
+                continue
+            ctx.cache.put(key, step_name=step, prompt_hash=prompt.hash, schema_hash=s_hash, model=resp.model,
+                          payload=obj.model_dump(mode="json"), prompt_tokens=resp.prompt_tokens,
+                          completion_tokens=resp.completion_tokens)
+            if excluded:
+                ctx.trace("model_fallback_ok", step=step, model=resp.model, excluded=sorted(excluded))
+            return obj, resp.model, False
+        if model is not None:
+            errors.append(f"{model}: {last_error[:120] or 'недоступна'}")
+            excluded.add(model)
+            ctx.trace("model_fallback", step=step, failed_model=model, error=last_error[:200])
+        retries = min(retries, 1)  # для следующих моделей цепочки — один ретрай валидации
 
 
 # --------------------------------------------------------------------------- #
@@ -191,23 +227,55 @@ def _token_chunks(reqs: list[Requirement], limit: int) -> list[list[Requirement]
 # --------------------------------------------------------------------------- #
 
 
+async def _pass0_block(ctx: AuditContext, title: str, chunk: list[Requirement], step: str) -> tuple[GlobalRegistry, str]:
+    doc = render_requirements(chunk, ctx.masker)
+    part, model, _ = await structured_call(
+        ctx, step=step, group="deep", prompt=PASS0_REGISTRY,
+        values={"title": ctx.masker.mask(title), "document": spotlight(doc)},
+        schema=GlobalRegistry, canonical_input={"title": title, "doc": doc})
+    return GlobalRegistry.model_validate(ctx.masker.unmask_obj(part.model_dump())), model
+
+
+def _split_block(chunk: list[Requirement], limit: int) -> list[list[Requirement]]:
+    blocks = _token_chunks(chunk, limit)
+    if len(blocks) == 1 and len(chunk) > 1:
+        mid = len(chunk) // 2
+        blocks = [chunk[:mid], chunk[mid:]]
+    return blocks
+
+
 async def pass0_registry(ctx: AuditContext, title: str, reqs: list[Requirement], raw: str) -> tuple[GlobalRegistry, PassStatus]:
+    """Реестр сущностей. Если все модели цепочки вернули битый JSON на крупном блоке — повтор компактными
+    блоками (меньше выход → меньше шанс порчи JSON); ID требований и цитаты в блоках сохраняются."""
     registry = GlobalRegistry()
     calls0, hits0 = ctx.llm_calls, ctx.cache_hits
     failed: list[str] = []
+    models: set[str] = set()
+    block_mode = 0
     chunks = _token_chunks(reqs, PASS0_CHUNK_TOKENS)
     for i, chunk in enumerate(chunks):
-        doc = render_requirements(chunk, ctx.masker)
         try:
-            part, _, _ = await structured_call(
-                ctx, step=f"pass0:{i}", group="deep", prompt=PASS0_REGISTRY,
-                values={"title": ctx.masker.mask(title), "document": spotlight(doc)},
-                schema=GlobalRegistry, canonical_input={"title": title, "doc": doc})
-        except (StructuredCallError, *_LLM_ERRORS) as exc:
+            part, model = await _pass0_block(ctx, title, chunk, f"pass0:{i}")
+            registry = registry.merge(part)
+            models.add(model)
+            continue
+        except GuardError as exc:
             failed.append(str(exc)[:200])
             ctx.trace("pass_failed", name="pass0", chunk=i, error=str(exc)[:300])
             continue
-        registry = registry.merge(GlobalRegistry.model_validate(ctx.masker.unmask_obj(part.model_dump())))
+        except StructuredCallError as exc:
+            ctx.trace("pass0_block_mode", chunk=i, error=str(exc)[:300])
+        blocks = _split_block(chunk, BLOCK_CHUNK_TOKENS)
+        block_mode += len(blocks)
+        for j, block in enumerate(blocks):
+            try:
+                part, model = await _pass0_block(ctx, title, block, f"pass0:{i}.{j}")
+            except (StructuredCallError, *_LLM_ERRORS) as exc:
+                failed.append(f"блок {i}.{j}: {str(exc)[:160]}")
+                ctx.trace("pass_failed", name="pass0", chunk=f"{i}.{j}", error=str(exc)[:300])
+                continue
+            registry = registry.merge(part)
+            models.add(model)
 
     # Grounding реестра: числовой факт без подтверждённой цитаты не используется.
     by_id = {r.req_id: r for r in reqs}
@@ -220,14 +288,17 @@ async def pass0_registry(ctx: AuditContext, title: str, reqs: list[Requirement],
             kept.append(fact.model_copy(update={"quote": check.matched_text}))
     dropped = len(registry.numeric_facts) - len(kept)
     registry = registry.model_copy(update={"numeric_facts": kept})
-    status = "failed" if len(failed) == len(chunks) else ("partial" if failed else "ok")
+    status = "failed" if not models else ("partial" if failed else "ok")
     detail = f"терминов {len(registry.terms)}, ролей {len(registry.roles)}, числовых фактов {len(kept)}"
+    if block_mode:
+        detail += f"; блочный режим: {block_mode} компактных блоков"
     if dropped:
         detail += f" (отброшено без подтверждённой цитаты: {dropped})"
     if failed:
         detail += "; ошибки: " + "; ".join(failed[:2])
     return registry, PassStatus(name="Pass 0 — Global Registry", status=status, detail=detail,
-                                llm_calls=ctx.llm_calls - calls0, cache_hits=ctx.cache_hits - hits0, items=len(chunks))
+                                llm_calls=ctx.llm_calls - calls0, cache_hits=ctx.cache_hits - hits0,
+                                items=len(chunks) + block_mode, models=sorted(models))
 
 
 # --------------------------------------------------------------------------- #
@@ -251,12 +322,26 @@ def _to_defect(finding: Any, *, rule_suffix: str, model: str, pass_name: str, by
     )
 
 
+_ARROW_KINDS = {RequirementKind.DESIGN, RequirementKind.BUSINESS}
+_ARROW_NITPICK_RULES = {"ISO-525-03", "ISO-525-04", "ISO-525-05", "ISO-525-07", "ISO-525-09"}
+
+
+def _is_arrow_schema_nitpick(req: Requirement, rule_id: str, severity: str) -> bool:
+    """Детерминированная страховка к negative examples: придирки к схемам-стрелкам в архитектуре/UI/BPMN/sequence
+    (неполнота, неатомарность, непроверяемость, шаблон) снимаются; FATAL и противоречия (Pass 2) не трогаем."""
+    return (req.kind in _ARROW_KINDS and "→" in req.plain_text and rule_id in _ARROW_NITPICK_RULES
+            and severity != "FATAL")
+
+
 async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: GlobalRegistry, rule_defects: list[Defect],
                       hints: list[Hint]) -> tuple[list[Defect], set[str], PassStatus]:
     by_id = {r.req_id: r for r in reqs}
     sem = asyncio.Semaphore(ctx.settings.llm_concurrency)
     calls0, hits0 = ctx.llm_calls, ctx.cache_hits
     criteria = catalog_text(SINGLE_CRITERIA)
+
+    suppressed = [0]
+    models: set[str] = set()
 
     async def run_batch(batch: list[Requirement]) -> tuple[list[Defect], set[str], str | None]:
         ids = {r.req_id for r in batch}
@@ -269,16 +354,21 @@ async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: Glob
                 out, model, _ = await structured_call(
                     ctx, step=step, group=ctx.settings.pass1_group, prompt=PASS1_AUDIT,
                     values={"criteria": criteria, "registry": ctx.masker.mask(reg), "known": known,
-                            "requirements": spotlight(doc)},
+                            "negative_examples": PASS1_NEGATIVE_EXAMPLES, "requirements": spotlight(doc)},
                     schema=Pass1Output, canonical_input={"doc": doc, "reg": reg, "known": known})
             except (StructuredCallError, *_LLM_ERRORS) as exc:
                 ctx.trace("pass_failed", name="pass1", batch=step, error=str(exc)[:300])
                 return [], set(), f"{step}: {str(exc)[:160]}"
         out = Pass1Output.model_validate(ctx.masker.unmask_obj(out.model_dump()))
+        models.add(model)
         defects = []
         for f in out.findings:
             if f.req_id not in ids:
                 ctx.trace("finding_outside_batch", step=step, req_id=f.req_id)
+                continue
+            if _is_arrow_schema_nitpick(by_id[f.req_id], f.rule_id, f.severity):
+                suppressed[0] += 1
+                ctx.trace("arrow_schema_suppressed", step=step, req_id=f.req_id, rule=f.rule_id)
                 continue
             defects.append(_to_defect(f, rule_suffix="LLM", model=model, pass_name="pass1", by_id=by_id))
         return defects, ids, None
@@ -289,11 +379,13 @@ async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: Glob
     errors = [e for _, _, e in results if e]
     status = "failed" if results and len(errors) == len(results) else ("partial" if errors else "ok")
     detail = f"батчей {len(results)}, проверено требований {len(checked)} из {len(reqs)}, находок {len(defects)}"
+    if suppressed[0]:
+        detail += f"; снято придирок к схемам-стрелкам: {suppressed[0]}"
     if errors:
         detail += f"; неуспешных батчей {len(errors)}: " + "; ".join(errors[:2])
     return defects, checked, PassStatus(name="Pass 1 — проверка требований (п. 5.2.5)", status=status, detail=detail,
                                         llm_calls=ctx.llm_calls - calls0, cache_hits=ctx.cache_hits - hits0,
-                                        items=len(results))
+                                        items=len(results), models=sorted(models))
 
 
 # --------------------------------------------------------------------------- #
@@ -301,29 +393,82 @@ async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: Glob
 # --------------------------------------------------------------------------- #
 
 
+PASS2_NAME = "Pass 2 — проверка набора (п. 5.2.6, IEEE 830 п. 4.3)"
+
+
+async def _pass2_call(ctx: AuditContext, block: list[Requirement], registry: GlobalRegistry, known_defects: list[Defect],
+                      scope: str, step: str, by_id: dict[str, Requirement]) -> tuple[list[Defect], str]:
+    ids = {r.req_id for r in block}
+    doc = render_requirements(block, ctx.masker)
+    reg = canonical_json(registry.compact())  # реестр всего документа — мост между блоками
+    known = _known_for(ids if len(block) < len(by_id) else None, known_defects, [], ctx.masker)
+    out, model, _ = await structured_call(
+        ctx, step=step, group="deep", prompt=PASS2_HOLISTIC,
+        values={"criteria": catalog_text(SET_CRITERIA), "checklist": FINTECH_CHECKLIST, "scope": scope,
+                "contract_checks": PASS2_CONTRACT_CHECKS, "registry": ctx.masker.mask(reg), "known": known,
+                "requirements": spotlight(doc)},
+        schema=Pass2Output, canonical_input={"doc": doc, "reg": reg, "known": known, "scope": scope})
+    out = Pass2Output.model_validate(ctx.masker.unmask_obj(out.model_dump()))
+    return [_to_defect(f, rule_suffix=f.kind, model=model, pass_name="pass2", by_id=by_id) for f in out.findings], model
+
+
+def _section_blocks(reqs: list[Requirement], limit: int) -> list[tuple[str, list[Requirement]]]:
+    """Блоки по верхнему разделу документа (Часть A / Часть B …), крупные — по токенам. Порядок сохраняется."""
+    groups: dict[str, list[Requirement]] = {}
+    for r in reqs:
+        parts = [p for p in r.heading_path.split(" > ") if p]
+        key = parts[1] if len(parts) > 1 else (parts[0] if parts else "Документ")
+        groups.setdefault(key, []).append(r)
+    blocks: list[tuple[str, list[Requirement]]] = []
+    for name, items in groups.items():
+        for sub in _token_chunks(items, limit):
+            blocks.append((name, sub))
+    return blocks
+
+
 async def pass2_holistic(ctx: AuditContext, reqs: list[Requirement], registry: GlobalRegistry,
                          known_defects: list[Defect]) -> tuple[list[Defect], bool, PassStatus]:
+    """Проверка набора. Сначала весь документ; если все модели цепочки вернули пустой/битый ответ —
+    блочный режим по разделам с общим Глобальным реестром для межразделовой сверки."""
     by_id = {r.req_id: r for r in reqs}
     calls0, hits0 = ctx.llm_calls, ctx.cache_hits
-    doc = render_requirements(reqs, ctx.masker)
-    reg = canonical_json(registry.compact())
-    known = _known_for(None, known_defects, [], ctx.masker)
+
+    def status(st: str, detail: str, items: int, models: set[str]) -> PassStatus:
+        return PassStatus(name=PASS2_NAME, status=st, detail=detail, llm_calls=ctx.llm_calls - calls0,
+                          cache_hits=ctx.cache_hits - hits0, items=items, models=sorted(models))
+
     try:
-        out, model, _ = await structured_call(
-            ctx, step="pass2:all", group="deep", prompt=PASS2_HOLISTIC,
-            values={"criteria": catalog_text(SET_CRITERIA), "checklist": FINTECH_CHECKLIST,
-                    "registry": ctx.masker.mask(reg), "known": known, "requirements": spotlight(doc)},
-            schema=Pass2Output, canonical_input={"doc": doc, "reg": reg, "known": known})
-    except (StructuredCallError, *_LLM_ERRORS) as exc:
+        defects, model = await _pass2_call(ctx, reqs, registry, known_defects, "весь документ целиком", "pass2:all", by_id)
+        return defects, True, status("ok", f"находок {len(defects)}", 1, {model})
+    except GuardError as exc:
         ctx.trace("pass_failed", name="pass2", error=str(exc)[:300])
-        return [], False, PassStatus(name="Pass 2 — проверка набора (п. 5.2.6, IEEE 830 п. 4.3)", status="failed",
-                                     detail=str(exc)[:240], llm_calls=ctx.llm_calls - calls0,
-                                     cache_hits=ctx.cache_hits - hits0)
-    out = Pass2Output.model_validate(ctx.masker.unmask_obj(out.model_dump()))
-    defects = [_to_defect(f, rule_suffix=f.kind, model=model, pass_name="pass2", by_id=by_id) for f in out.findings]
-    return defects, True, PassStatus(name="Pass 2 — проверка набора (п. 5.2.6, IEEE 830 п. 4.3)", status="ok",
-                                     detail=f"находок {len(defects)}", llm_calls=ctx.llm_calls - calls0,
-                                     cache_hits=ctx.cache_hits - hits0, items=1)
+        return [], False, status("failed", str(exc)[:240], 0, set())
+    except StructuredCallError as exc:
+        first_error = str(exc)[:200]
+        ctx.trace("pass2_block_mode", error=first_error)
+
+    blocks = _section_blocks(reqs, PASS2_BLOCK_TOKENS)
+    defects: list[Defect] = []
+    models: set[str] = set()
+    errors: list[str] = []
+    for k, (name, block) in enumerate(blocks, start=1):
+        scope = (f"блок {k} из {len(blocks)} — раздел «{name}» ({block[0].req_id}…{block[-1].req_id}). "
+                 "Противоречия с другими разделами ищи через Глобальный реестр (числа, термины, ссылки); "
+                 "в related_req_id можно указывать требования из других разделов, если они есть в реестре.")
+        try:
+            found, model = await _pass2_call(ctx, block, registry, known_defects, scope, f"pass2:block{k}", by_id)
+        except (StructuredCallError, *_LLM_ERRORS) as exc:
+            errors.append(f"блок {k}: {str(exc)[:140]}")
+            ctx.trace("pass_failed", name="pass2", block=k, error=str(exc)[:300])
+            continue
+        defects += found
+        models.add(model)
+    st = "failed" if not models else ("partial" if errors else "ok")
+    detail = (f"полный проход не удался ({first_error[:120]}); блочный режим: {len(blocks) - len(errors)} из "
+              f"{len(blocks)} блоков, находок {len(defects)}")
+    if errors:
+        detail += "; ошибки: " + "; ".join(errors[:2])
+    return defects, st == "ok", status(st, detail, len(blocks), models)
 
 
 # --------------------------------------------------------------------------- #

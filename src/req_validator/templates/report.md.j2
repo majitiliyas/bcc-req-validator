@@ -38,7 +38,9 @@
 | Параметр | Значение |
 | :--- | :--- |
 | Использованные модели | {{ llm.models_used | cell }} |
-| Маршрутизация (группы) | {{ llm.groups | cell }} |
+{% for r in llm.routes %}
+| Маршрут группы `{{ r.group }}` | {{ r.chain | cell }} |
+{% endfor %}
 | Версии промптов | {{ llm.prompts | cell }} |
 | Вызовов LLM / из кэша SQLite | {{ llm.calls }} / {{ llm.cache_hits }} |
 | Токены (вход / выход) | {{ llm.tokens }} |
@@ -49,10 +51,10 @@
 | Бюджет прогона | {{ llm.budget | cell }} |
 | Глобальный реестр (Pass 0) | {{ llm.registry | cell }} |
 
-| Проход | Статус | Вызовов / кэш | Детали |
-| :--- | :--- | :---: | :--- |
+| Проход | Статус | Модели | Вызовов / кэш | Детали |
+| :--- | :--- | :--- | :---: | :--- |
 {% for ps in llm.passes %}
-| {{ ps.name }} | {{ ps.status }} | {{ ps.calls }} / {{ ps.cache }} | {{ ps.detail | cell }} |
+| {{ ps.name }} | {{ ps.status }} | {{ ps.models | cell }} | {{ ps.calls }} / {{ ps.cache }} | {{ ps.detail | cell }} |
 {% endfor %}
 {% if llm.rejected_examples %}
 

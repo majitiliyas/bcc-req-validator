@@ -69,7 +69,7 @@
   #table(columns: (4.2cm, 1fr),
     [Параметр], [Значение],
     [Модели], [#d.llm.models_used],
-    [Маршрутизация], [#text(size: 8pt, d.llm.groups)],
+    ..d.llm.routes.map(r => ([Маршрут #r.group], text(size: 8pt, r.chain))).flatten(),
     [Версии промптов], [#text(size: 7.5pt, d.llm.prompts)],
     [Вызовов / из кэша], [#str(d.llm.calls) / #str(d.llm.cache_hits); токены #d.llm.tokens; 429: #str(d.llm.rate_limited); перенаправлений: #str(d.llm.reroutes)],
     [Отклонено без цитаты], [#str(d.llm.unverified)],
@@ -77,9 +77,10 @@
     [Маскирование ПДн], [#d.llm.pii],
     [Бюджет / реестр], [#d.llm.budget · #d.llm.registry],
   )
-  #table(columns: (5cm, 2.2cm, 1.8cm, 1fr),
-    [Проход], [Статус], [Вызовы / кэш], [Детали],
-    ..d.llm.passes.map(ps => (ps.name, ps.raw_status, str(ps.calls) + " / " + str(ps.cache), ps.detail)).flatten(),
+  #table(columns: (3.6cm, 1.5cm, 3.2cm, 1.5cm, 1fr),
+    [Проход], [Статус], [Модели], [Вызовы / кэш], [Детали],
+    ..d.llm.passes.map(ps => (ps.name, ps.raw_status, text(size: 7.5pt, ps.models),
+      str(ps.calls) + " / " + str(ps.cache), text(size: 8pt, ps.detail))).flatten(),
   )
 ]
 

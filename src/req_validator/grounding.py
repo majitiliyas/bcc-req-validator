@@ -355,3 +355,35 @@ def safe_decimal_eval(expr: str, variables: Mapping[str, Decimal | int | str] | 
     if isinstance(result, bool) or not isinstance(result, (Decimal, int)):
         raise NumericError(f"Результат не является числом Decimal: {type(result).__name__}")
     return Decimal(result)
+
+
+def fragment_key(d: Defect) -> tuple[str | None, str, str]:
+    """Нормализованный ключ фрагмента: требование + цитата (+ вторая цитата противоречия)."""
+    return (d.req_id, normalize_with_map(d.exact_quote)[0], normalize_with_map(d.related_quote or "")[0])
+
+
+def deduplicate_by_fragment(defects: Iterable[Defect]) -> list[Defect]:
+    """Один и тот же фрагмент засчитывается один раз, даже если его нашли разные правила/проходы.
+
+    Остаётся самая серьёзная находка; при равной серьёзности — детерминированное правило, затем
+    подтверждённая Критиком. Коды поглощённых правил дописываются в review_note.
+    """
+    from .models import FindingSource, ReviewStatus
+
+    def rank(d: Defect) -> tuple[int, int, int]:
+        review = {ReviewStatus.DETERMINISTIC: 0, ReviewStatus.CONFIRMED: 1, ReviewStatus.DOWNGRADED: 2,
+                  ReviewStatus.NOT_REVIEWED: 3}[d.review_status]
+        return d.severity.rank, 0 if d.source == FindingSource.RULES else 1, review
+
+    groups: dict[tuple[str | None, str, str], list[Defect]] = {}
+    for d in defects:
+        groups.setdefault(fragment_key(d), []).append(d)
+    out: list[Defect] = []
+    for items in groups.values():
+        best = min(items, key=rank)
+        others = sorted({x.rule_id for x in items if x is not best and x.rule_id != best.rule_id})
+        if others:
+            note = (best.review_note + " " if best.review_note else "") + f"Тот же фрагмент также: {', '.join(others)}."
+            best = best.model_copy(update={"review_note": note})
+        out.append(best)
+    return out

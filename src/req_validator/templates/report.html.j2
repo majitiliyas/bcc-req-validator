@@ -53,7 +53,7 @@
 <h3>LLM-аудит</h3>
 <table>
 <tr><th>Использованные модели</th><td>{{ llm.models_used }}</td></tr>
-<tr><th>Маршрутизация</th><td>{{ llm.groups }}</td></tr>
+{% for r in llm.routes %}<tr><th>Маршрут группы <code>{{ r.group }}</code></th><td>{{ r.chain }}</td></tr>{% endfor %}
 <tr><th>Версии промптов</th><td><code>{{ llm.prompts }}</code></td></tr>
 <tr><th>Вызовов LLM / из кэша</th><td>{{ llm.calls }} / {{ llm.cache_hits }}; токены {{ llm.tokens }}; 429: {{ llm.rate_limited }}; перенаправлений: {{ llm.reroutes }}</td></tr>
 <tr><th>Отклонено без цитаты</th><td>{{ llm.unverified }}</td></tr>
@@ -61,8 +61,8 @@
 <tr><th>Маскирование ПДн</th><td>{{ llm.pii }}</td></tr>
 <tr><th>Бюджет / реестр</th><td>{{ llm.budget }} · {{ llm.registry }}</td></tr>
 </table>
-<table><tr><th>Проход</th><th>Статус</th><th>Вызовов / кэш</th><th>Детали</th></tr>
-{% for ps in llm.passes %}<tr><td>{{ ps.name }}</td><td>{{ ps.status }}</td><td class="c">{{ ps.calls }} / {{ ps.cache }}</td><td>{{ ps.detail }}</td></tr>{% endfor %}
+<table><tr><th>Проход</th><th>Статус</th><th>Модели</th><th>Вызовов / кэш</th><th>Детали</th></tr>
+{% for ps in llm.passes %}<tr><td>{{ ps.name }}</td><td>{{ ps.status }}</td><td>{{ ps.models }}</td><td class="c">{{ ps.calls }} / {{ ps.cache }}</td><td>{{ ps.detail }}</td></tr>{% endfor %}
 </table>
 {% if llm.rejected_examples %}<details><summary>Отклонённые находки LLM</summary><ul>{% for x in llm.rejected_examples %}<li>{{ x }}</li>{% endfor %}</ul></details>{% endif %}
 {% endif %}

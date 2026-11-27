@@ -257,6 +257,7 @@ class PassStatus(BaseModel):
     llm_calls: int = 0
     cache_hits: int = 0
     items: int = 0
+    models: list[str] = Field(default_factory=list, description="Модели, выдавшие валидный ответ в этом проходе")
 
 
 class LLMRunInfo(BaseModel):

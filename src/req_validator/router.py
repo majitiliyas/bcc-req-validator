@@ -301,10 +301,30 @@ class OpenAICompatTransport:
 # Роутер
 # --------------------------------------------------------------------------- #
 
+EMPTY_MAX_TOKENS = 5
+
+
+def is_empty_response(resp: ChatResponse) -> bool:
+    """Пустой ответ: нет текста или ≤ 5 токенов, которые не разбираются как JSON."""
+    import json
+
+    from .llm_schemas import extract_json_text
+
+    text = extract_json_text(resp.text).strip()
+    if not text:
+        return True
+    if resp.completion_tokens <= EMPTY_MAX_TOKENS:
+        try:
+            json.loads(text)
+        except ValueError:
+            return True
+    return False
+
 
 @dataclass
 class RouterStats:
     calls: int = 0
+    empty_responses: int = 0
     attempts: int = 0
     rate_limited: int = 0
     reroutes: int = 0
@@ -394,16 +414,26 @@ class LLMRouter:
         deps = list(self.groups.get(group, []))
         return [d for d in deps if d.name not in prefer_not] + [d for d in deps if d.name in prefer_not]
 
-    async def complete(self, group: str, req: ChatRequest, *, prefer_not: set[str] | None = None) -> ChatResponse:
-        """Один логический вызов LLM с маршрутизацией, ретраями, cooldown и контролем бюджета."""
+    async def complete(self, group: str, req: ChatRequest, *, prefer_not: set[str] | None = None,
+                       exclude: set[str] | None = None, pin: str | None = None) -> ChatResponse:
+        """Один логический вызов LLM с маршрутизацией, ретраями, cooldown и контролем бюджета.
+
+        prefer_not — модели, которые пробуются последними (независимость Критика);
+        exclude    — модели, которые нельзя использовать (уже провалили этот шаг);
+        pin        — только указанная модель (ретрай валидации на той же модели).
+        """
         req.validate_compat()
         est_in = estimate_tokens(req.text)
-        self.guard.before_call(req.request_hash, est_in + req.max_tokens)
+        exclude = exclude or set()
+        call_key = sha256_hex(canonical_json({"r": req.request_hash, "x": sorted(exclude), "p": pin}))
+        self.guard.before_call(call_key, est_in + req.max_tokens)
         self.stats.calls += 1
         attempts_log: list[str] = []
         prefer_not = prefer_not or set()
         for g in self.GROUP_FALLBACK.get(group, [group]):
             for dep in self._ordered(g, prefer_not):
+                if dep.name in exclude or (pin is not None and dep.name != pin):
+                    continue
                 now = self.clock()
                 if not dep.available(now):
                     attempts_log.append(f"{dep.name}: недоступен ({dep.disabled_reason or 'cooldown'})")
@@ -469,8 +499,17 @@ class LLMRouter:
                 await self.sleep(self.backoff_delay(attempt, err.retry_after))
                 attempt += 1
                 continue
-            dep.fails = 0
             dep.record_tokens(self.clock(), resp.prompt_tokens + resp.completion_tokens)
+            if req.json_schema is not None and is_empty_response(resp):
+                # Пустой ответ (≤ 5 токенов без валидного JSON) детерминирован при temperature=0:
+                # повтор на той же модели бесполезен — переходим к следующей модели цепочки.
+                self.stats.empty_responses += 1
+                self.guard.tokens_used += resp.prompt_tokens + resp.completion_tokens
+                log.append(f"{dep.name}: пустой ответ ({resp.completion_tokens} ток.)")
+                self._trace("empty_response", deployment=dep.name, step=req.step,
+                            completion_tokens=resp.completion_tokens, text=resp.text[:40])
+                return None
+            dep.fails = 0
             self._trace("llm_call", deployment=dep.name, step=req.step, prompt_tokens=resp.prompt_tokens,
                         completion_tokens=resp.completion_tokens, latency_s=round(self.clock() - t0, 3))
             return resp

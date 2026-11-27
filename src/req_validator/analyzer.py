@@ -17,7 +17,7 @@ from . import __version__
 from .auditor import AuditContext, LLMAuditOutcome, run_llm_audit
 from .cache import DiskStepCache
 from .config import Settings, load_settings
-from .grounding import deduplicate_defects, ground_defects
+from .grounding import deduplicate_by_fragment, deduplicate_defects, ground_defects
 from .guards import AgentBudgetGuard, TraceLogger
 from .ingestion import ingest
 from .models import (
@@ -114,7 +114,10 @@ def run_audit(input_path: str | Path, *, demo: bool = True, settings: Settings |
     if not demo and reqs:
         outcome, llm_info = _run_llm(settings, doc, reqs, rule_defects, hints, tracer, transport, router, notes)
 
-    all_defects = rule_defects + (outcome.defects if outcome else [])
+    combined = rule_defects + (outcome.defects if outcome else [])
+    all_defects = deduplicate_by_fragment(combined)
+    if len(all_defects) < len(combined):
+        notes.append(f"Снято повторов одного и того же фрагмента: {len(combined) - len(all_defects)}.")
     order = {r.req_id: i for i, r in enumerate(reqs)}
     order[None] = len(reqs)
     defects = _sort_and_number(all_defects, order)

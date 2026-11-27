@@ -191,10 +191,12 @@ def _llm_view(report: AuditReport) -> dict[str, Any] | None:
         return None
     return {
         "models_used": ", ".join(f"{m} ×{n}" for m, n in info.models_used.items()) or "—",
-        "groups": "; ".join(f"{g}: {' → '.join(ds) or 'нет ключей'}" for g, ds in info.groups.items()),
+        "routes": [{"group": g, "chain": " → ".join(ds) if ds else "нет доступных моделей"}
+                   for g, ds in info.groups.items()],
         "prompts": ", ".join(f"{k}@{v}" for k, v in info.prompt_versions.items()),
         "passes": [{"name": p.name, "status": PASS_STATUS_TEXT.get(p.status, p.status), "raw_status": p.status,
-                    "detail": p.detail, "calls": p.llm_calls, "cache": p.cache_hits} for p in info.passes],
+                    "detail": p.detail, "calls": p.llm_calls, "cache": p.cache_hits,
+                    "models": ", ".join(p.models) or "—"} for p in info.passes],
         "calls": info.llm_calls, "cache_hits": info.cache_hits,
         "tokens": f"{info.prompt_tokens} / {info.completion_tokens}",
         "rate_limited": info.rate_limited, "reroutes": info.reroutes,
@@ -218,6 +220,14 @@ def _md_cell(value: Any) -> str:
     return text.replace("|", "\\|") or "—"
 
 
+def _md_finalize(value: Any) -> Any:
+    """Экранирование для Markdown: `$` (иначе просмотрщики с KaTeX/MathJax превращают текст между двумя `$`
+    — например, curl-команду с $BASE … $TOKEN — в формулу)."""
+    if isinstance(value, str):
+        return value.replace("\\$", "$").replace("$", "\\$")
+    return "" if value is None else value
+
+
 def _md_quote(value: Any) -> str:
     lines = str(value).strip().split("\n")
     return "\n".join("> " + line.strip() for line in lines)
@@ -228,6 +238,7 @@ def _env(autoescape: bool) -> Environment:
         loader=FileSystemLoader(TEMPLATES_DIR),
         autoescape=select_autoescape(["html"]) if autoescape else False,
         undefined=StrictUndefined, trim_blocks=True, lstrip_blocks=True, keep_trailing_newline=True,
+        finalize=None if autoescape else _md_finalize,
     )
     env.filters["cell"] = _md_cell
     env.filters["mdquote"] = _md_quote
