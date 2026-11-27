@@ -128,6 +128,7 @@ async def structured_call(
     schema: type[T],
     canonical_input: Any,
     prefer_not: set[str] | None = None,
+    exclude: set[str] | None = None,
 ) -> tuple[T, str, bool]:
     """Вернуть (валидный объект, модель, из_кэша). Ключ кэша = sha256(step + input + prompt_hash + schema_hash)."""
     s_hash = schema_hash(schema)
@@ -146,7 +147,7 @@ async def structured_call(
     system, user = prompt.render(**values)
     base_messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     schema_json = api_schema(schema)
-    excluded: set[str] = set()
+    excluded: set[str] = set(exclude or ())  # модели, которые нельзя использовать (например, первая в ансамбле)
     errors: list[str] = []
     retries = ctx.settings.max_validation_retries
     while True:
@@ -424,7 +425,8 @@ PASS2_NAME = "Pass 2 — проверка набора (п. 5.2.6, IEEE 830 п. 
 
 
 async def _pass2_call(ctx: AuditContext, block: list[Requirement], registry: GlobalRegistry, known_defects: list[Defect],
-                      scope: str, step: str, by_id: dict[str, Requirement]) -> tuple[list[Defect], str]:
+                      scope: str, step: str, by_id: dict[str, Requirement], *, member: int = 1,
+                      exclude: set[str] | None = None, prefer_not: set[str] | None = None) -> tuple[list[Defect], str]:
     ids = {r.req_id for r in block}
     doc = render_requirements(block, ctx.masker)
     reg = canonical_json(registry.compact())  # реестр всего документа — мост между блоками
@@ -435,9 +437,82 @@ async def _pass2_call(ctx: AuditContext, block: list[Requirement], registry: Glo
                 "contract_checks": PASS2_CONTRACT_CHECKS, "registry": ctx.masker.mask(reg), "known": known,
                 "requirements": spotlight(doc), "full_context": full_context_block(ctx.full_context)},
         schema=Pass2Output, canonical_input={"doc": doc, "reg": reg, "known": known, "scope": scope,
-                                             "ctx": sha256_hex(ctx.full_context)})
+                                             "ctx": sha256_hex(ctx.full_context),
+                                             **({"member": member} if member > 1 else {})},
+        exclude=exclude, prefer_not=prefer_not)
     out = Pass2Output.model_validate(ctx.masker.unmask_obj(out.model_dump()))
     return [_to_defect(f, rule_suffix=f.kind, model=model, pass_name="pass2", by_id=by_id) for f in out.findings], model
+
+
+def _pass2_key(d: Defect) -> tuple[Any, ...]:
+    """Ключ «той же находки» у двух моделей: противоречие — пара требований (без порядка) и критерий;
+    остальное — требование, критерий и нормализованная цитата."""
+    base = d.rule_id.split("/")[0]
+    if d.related_quote:
+        return (base, "pair", frozenset({d.req_id, d.related_req_ids[0] if d.related_req_ids else None}))
+    return (base, d.req_id, normalize_with_map(d.exact_quote)[0])
+
+
+def merge_pass2(first: list[Defect], second: list[Defect]) -> tuple[list[Defect], int]:
+    """Объединить находки двух моделей Pass 2 до Grounding Gate. Совпавшие склеиваются (остаётся более серьёзная,
+    в `agreement` — обе модели); уникальные находки каждой модели сохраняются. Возвращает (список, число совпадений)."""
+    out: list[Defect] = []
+    index: dict[tuple[Any, ...], int] = {}
+
+    def same_as(d: Defect) -> int | None:
+        k = _pass2_key(d)
+        if k in index:
+            return index[k]
+        if not d.related_quote:  # вложенные цитаты на том же требовании и критерии — та же находка
+            nq = normalize_with_map(d.exact_quote)[0]
+            for i, x in enumerate(out):
+                if (not x.related_quote and x.req_id == d.req_id and x.rule_id.split("/")[0] == d.rule_id.split("/")[0]):
+                    nx = normalize_with_map(x.exact_quote)[0]
+                    if nq and nx and (nq in nx or nx in nq):
+                        return i
+        return None
+
+    agreed = 0
+    for d in first:  # находки первой модели не склеиваются между собой — только с находками второй
+        index.setdefault(_pass2_key(d), len(out))
+        out.append(d.model_copy(update={"agreement": [d.model] if d.model else []}))
+    for d in second:
+        i = same_as(d)
+        if i is None:
+            index[_pass2_key(d)] = len(out)
+            out.append(d.model_copy(update={"agreement": [d.model] if d.model else []}))
+            continue
+        x = out[i]
+        models = sorted(set(x.agreement) | ({d.model} if d.model else set()))
+        if len(models) > len(x.agreement):
+            agreed += 1
+        keep = d if d.severity.rank < x.severity.rank else x
+        out[i] = keep.model_copy(update={"agreement": models})
+    return out, agreed
+
+
+async def _pass2_second_opinion(ctx: AuditContext, reqs: list[Requirement], registry: GlobalRegistry,
+                                known_defects: list[Defect], by_id: dict[str, Requirement], first: list[Defect],
+                                first_model: str) -> tuple[list[Defect], str, set[str]]:
+    """Второй независимый прогон Pass 2 на ДРУГОЙ модели (по возможности другого семейства) и объединение.
+    Если вторая модель недоступна — graceful fallback на результат первой с пометкой в деталях прохода."""
+    provider = first_model.split("/", 1)[0]
+    same_family = {d.name for d in ctx.router.groups.get("deep", []) if d.provider == provider}
+    try:
+        second, second_model = await _pass2_call(
+            ctx, reqs, registry, known_defects, "весь документ целиком", "pass2:all", by_id, member=2,
+            exclude={first_model}, prefer_not=same_family)
+    except (StructuredCallError, *_LLM_ERRORS) as exc:
+        ctx.trace("pass2_ensemble_fallback", first=first_model, error=str(exc)[:300])
+        return first, (f"находок {len(first)}; ансамбль: вторая модель недоступна ({str(exc)[:110]}) — "
+                       f"использован результат {first_model}"), {first_model}
+    if second_model == first_model:  # из кэша/без альтернатив — независимого мнения нет
+        return first, f"находок {len(first)}; ансамбль: вторая независимая модель не найдена", {first_model}
+    merged, agreed = merge_pass2(first, second)
+    ctx.trace("pass2_ensemble", first=first_model, second=second_model, n_first=len(first), n_second=len(second),
+              merged=len(merged), agreed=agreed)
+    return merged, (f"ансамбль 2 моделей: {first_model} — {len(first)}, {second_model} — {len(second)}; "
+                    f"после объединения {len(merged)} (совпало у обеих: {agreed})"), {first_model, second_model}
 
 
 def _section_blocks(reqs: list[Requirement], limit: int) -> list[tuple[str, list[Requirement]]]:
@@ -467,7 +542,10 @@ async def pass2_holistic(ctx: AuditContext, reqs: list[Requirement], registry: G
 
     try:
         defects, model = await _pass2_call(ctx, reqs, registry, known_defects, "весь документ целиком", "pass2:all", by_id)
-        return defects, True, status("ok", f"находок {len(defects)}", 1, {model})
+        if not ctx.settings.pass2_ensemble:
+            return defects, True, status("ok", f"находок {len(defects)}", 1, {model})
+        merged, detail, models = await _pass2_second_opinion(ctx, reqs, registry, known_defects, by_id, defects, model)
+        return merged, True, status("ok", detail, len(models), models)
     except GuardError as exc:
         ctx.trace("pass_failed", name="pass2", error=str(exc)[:300])
         return [], False, status("failed", str(exc)[:240], 0, set())
@@ -691,7 +769,7 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
                 block.append("Текст требования:\n" + spotlight(req.text))
             items.append(ctx.masker.mask("\n".join(block)))
         items_text = "\n\n".join(items)
-        gen_models = {d.model for _, d in batch if d.model}
+        gen_models = {m for _, d in batch for m in ([d.model] if d.model else []) + list(d.agreement)}
         try:
             out, model, _ = await structured_call(
                 ctx, step=f"critic:{sha256_hex(items_text)[:12]}", group="critic", prompt=CRITIC,
@@ -720,7 +798,7 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
             continue
         stats["reviewed"] += 1
         cmodel = critic_models[item_id]
-        same = cmodel == d.model
+        same = cmodel == d.model or cmodel in d.agreement
         stats["same_model"] += int(same)
         pairs[f"{d.model or '?'} → {cmodel}"] += 1
         note = f"Критик ({cmodel}{', та же модель' if same else ''}): {ctx.masker.unmask(dec.reason)}"

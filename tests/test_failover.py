@@ -76,7 +76,7 @@ def test_is_empty_response() -> None:
 
 def test_empty_response_switches_model_without_retrying_same(settings: Settings, doc_path: Path) -> None:
     fake = PerModel(pass2=lambda dep, req: "" if dep.name == "gemini/model-a" else default_pass2(req))
-    report = audit(settings, doc_path, fake)
+    report = audit(settings.model_copy(update={"pass2_ensemble": False}), doc_path, fake)
     p2 = _pass(report, "Pass 2")
     assert p2.status == "ok" and p2.models == ["nvidia/model-b"]
     pass2_calls = [dep for dep, step, _ in fake.calls if step.startswith("pass2")]

@@ -196,6 +196,7 @@ class Defect(BaseModel):
     model: str | None = Field(default=None, description="Модель, сгенерировавшая находку")
     pass_name: str | None = Field(default=None, description="pass1 | pass2 | rules")
     binding_note: str = Field(default="", description="Скорректированная привязка к требованию (ID/ссылка)")
+    agreement: list[str] = Field(default_factory=list, description="Модели ансамбля Pass 2, нашедшие эту находку")
 
     @property
     def priority(self) -> str:

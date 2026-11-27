@@ -1,6 +1,6 @@
 [project]
 name = "req-validator"
-version = "1.0.1"
+version = "1.0.2"
 description = "CLI-агент статической проверки требований (SRS/BRD) по ISO/IEC/IEEE 29148:2018 и IEEE Std 830-1998"
 readme = "README.md"
 requires-python = ">=3.12,<3.14"

@@ -63,6 +63,7 @@ class Settings(BaseSettings):
 
     # --- пайплайн аудита ---
     pass1_group: str = "fast"
+    pass2_ensemble: bool = Field(default=True, description="Pass 2 на двух разных моделях с объединением находок")
     pass1_batch_size: int = Field(default=5, ge=1, le=10)
     critic_batch_size: int = Field(default=6, ge=1, le=20)
     llm_concurrency: int = Field(default=3, ge=1, le=10)

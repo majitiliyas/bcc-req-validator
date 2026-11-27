@@ -166,7 +166,7 @@ def test_critic_uses_separate_chain_and_pairs_telemetry(s: Settings, doc_path: P
 
 
 def test_critic_avoids_generator_even_if_first_in_critic_chain(s: Settings, doc_path: Path) -> None:
-    s2 = s.model_copy(update={"critic_models": "gemini/model-a,nvidia/model-b"})
+    s2 = s.model_copy(update={"critic_models": "gemini/model-a,nvidia/model-b", "pass2_ensemble": False})
     fake = FakeLLM(pass1=_pass1, pass2=_pass2)
     audit(s2, doc_path, fake)
     assert {dep for dep, step, _ in fake.calls if step.startswith("critic")} == {"nvidia/model-b"}

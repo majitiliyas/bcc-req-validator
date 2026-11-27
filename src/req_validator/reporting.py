@@ -113,6 +113,8 @@ def _source_label(d: Defect) -> str:
     if d.source == FindingSource.RULES:
         return "правила"
     where = {"pass1": "LLM Pass 1", "pass2": "LLM Pass 2"}.get(d.pass_name or "", "LLM")
+    if len(d.agreement) > 1:
+        return f"{where} (обе модели ансамбля: {' + '.join(d.agreement)})"
     return f"{where} ({d.model})" if d.model else where
 
 
