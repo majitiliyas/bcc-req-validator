@@ -25,6 +25,7 @@ STATIC = ROOT / "src/req_validator/web/static"
 BOB, BRAND, SCENE = STATIC / "bob", STATIC / "brand", OUT / "assets"
 
 TEAM = "Команда «ВУПИПАЙ»"
+MEMBERS = ("Елубай Илияс", "Мубарак Мансур", "Мылтыкбай Улпан")
 TOTAL = 10
 H_FONT, B_FONT, M_FONT = "Arial Black", "Arial", "Consolas"
 
@@ -530,14 +531,15 @@ def s10(prs):
         text(s, 9.32, y + 0.45, 3.25, 0.75, b, size=11.5, color=MUTED)
     team = rect(s, 0.6, 4.65, 4.1, 2.1, VIOLET, radius=0.1)
     grad(team, VIOLET, BLUE, 0)
-    text(s, 0.85, 4.78, 3.7, 0.3, "Мы —", size=12, color="E0E7FF", bold=True)
-    text(s, 0.85, 5.05, 3.7, 0.5, TEAM, size=18, font=H_FONT)
-    text(s, 0.85, 5.72, 3.7, 0.95, "DAIEK v1.1.0: CLI-ядро v1.0.2 + Web UI с Бобом\n"
-         "github.com/majitiliyas/bcc-req-validator", size=11, color="E0E7FF", spacing=1.15)
+    text(s, 0.85, 4.75, 3.7, 0.25, "Мы —", size=11, color="E0E7FF", bold=True)
+    text(s, 0.85, 4.97, 3.7, 0.4, TEAM, size=18, font=H_FONT)
+    text(s, 0.85, 5.42, 3.7, 0.85, [[("•  ", {"color": GOLD2}), (n, {})] for n in MEMBERS],
+         size=13, bold=True, spacing=1.05)
+    text(s, 0.85, 6.35, 3.7, 0.3, "github.com/majitiliyas/bcc-req-validator", size=10.5, color="E0E7FF")
     notes(s, 10, "4:50–5:20", "Надёжность: при 429 срабатывает каскад провайдеров с backoff и кэшем, ядро покрыто "
           "184 автотестами, битые и пустые файлы дают понятный CANNOT_PROCEED вместо трейсбека, ПДн маскируются до "
           "LLM. Дальше — интеграция с Jira и Confluence: дефекты становятся задачами с REQ-ID и приоритетом. Мы — "
-          "Команда «ВУПИПАЙ». Спасибо! Боб готов к вопросам.")
+          "Команда «ВУПИПАЙ»: Елубай Илияс, Мубарак Мансур и Мылтыкбай Улпан. Спасибо! Боб готов к вопросам.")
 
 
 def write_notes_md() -> None:
