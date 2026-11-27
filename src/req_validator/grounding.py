@@ -391,26 +391,71 @@ def fragment_key(d: Defect) -> tuple[str | None, str, str]:
     return (d.req_id, normalize_with_map(d.exact_quote)[0], normalize_with_map(d.related_quote or "")[0])
 
 
-def deduplicate_by_fragment(defects: Iterable[Defect]) -> list[Defect]:
+def deduplicate_by_fragment(defects: Iterable[Defect], requirements: Iterable[Requirement] | None = None,
+                            *, cover: float = 0.8) -> list[Defect]:
     """Один и тот же фрагмент засчитывается один раз, даже если его нашли разные правила/проходы.
 
-    Остаётся самая серьёзная находка; при равной серьёзности — детерминированное правило, затем
-    подтверждённая Критиком. Коды поглощённых правил дописываются в review_note.
+    «Тот же фрагмент»: (а) совпадают требование и нормализованная цитата (+ вторая цитата противоречия) или
+    (б) на одном требовании цитата одной находки целиком лежит внутри цитаты другой, а внешняя цитата покрывает
+    ≥ `cover` текста требования (короткие пункты и строки таблиц: «GET» внутри «| REST type | GET |»,
+    «TBD» внутри «Комиссия за перевод TBD.»). В длинных требованиях вложенные цитаты считаются разными дефектами.
+
+    Остаётся самая серьёзная находка; при равенстве — детерминированное правило, затем противоречие со второй
+    цитатой, затем подтверждённая Критиком. Коды поглощённых правил дописываются в review_note.
     """
     from .models import FindingSource, ReviewStatus
 
-    def rank(d: Defect) -> tuple[int, int, int]:
+    items = list(defects)
+    spans = {r.req_id: (r.start_char, r.end_char) for r in (requirements or [])}
+    parent = list(range(len(items)))
+
+    def find(i: int) -> int:
+        while parent[i] != i:
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        return i
+
+    def union(i: int, j: int) -> None:
+        parent[find(i)] = find(j)
+
+    keys: dict[tuple[str | None, str, str], int] = {}
+    for i, d in enumerate(items):
+        k = fragment_key(d)
+        if k in keys:
+            union(i, keys[k])
+        else:
+            keys[k] = i
+    for i, a in enumerate(items):
+        for j in range(i + 1, len(items)):
+            b = items[j]
+            if a.req_id is None or a.req_id != b.req_id or a.req_id not in spans:
+                continue
+            if None in (a.quote_start, a.quote_end, b.quote_start, b.quote_end):
+                continue
+            outer, inner = (a, b) if (a.quote_end - a.quote_start) >= (b.quote_end - b.quote_start) else (b, a)  # type: ignore[operator]
+            nested = outer.quote_start <= inner.quote_start and inner.quote_end <= outer.quote_end  # type: ignore[operator]
+            rs, re_ = spans[a.req_id]
+            if nested and (outer.quote_end - outer.quote_start) >= cover * max(1, re_ - rs):  # type: ignore[operator]
+                union(i, j)
+
+    def rank(d: Defect) -> tuple[int, int, int, int]:
         review = {ReviewStatus.DETERMINISTIC: 0, ReviewStatus.CONFIRMED: 1, ReviewStatus.DOWNGRADED: 2,
                   ReviewStatus.NOT_REVIEWED: 3}[d.review_status]
-        return d.severity.rank, 0 if d.source == FindingSource.RULES else 1, review
+        return d.severity.rank, 0 if d.source == FindingSource.RULES else 1, 0 if d.related_quote else 1, review
 
-    groups: dict[tuple[str | None, str, str], list[Defect]] = {}
-    for d in defects:
-        groups.setdefault(fragment_key(d), []).append(d)
+    groups: dict[int, list[Defect]] = {}
+    order: list[int] = []
+    for i, d in enumerate(items):
+        root = find(i)
+        if root not in groups:
+            groups[root] = []
+            order.append(root)
+        groups[root].append(d)
     out: list[Defect] = []
-    for items in groups.values():
-        best = min(items, key=rank)
-        others = sorted({x.rule_id for x in items if x is not best and x.rule_id != best.rule_id})
+    for root in order:
+        group = groups[root]
+        best = min(group, key=rank)
+        others = sorted({x.rule_id for x in group if x is not best and x.rule_id != best.rule_id})
         if others:
             note = (best.review_note + " " if best.review_note else "") + f"Тот же фрагмент также: {', '.join(others)}."
             best = best.model_copy(update={"review_note": note})

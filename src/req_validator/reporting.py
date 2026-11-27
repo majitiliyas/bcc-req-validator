@@ -283,11 +283,19 @@ def _md_cell(value: Any) -> str:
     return text.replace("|", "\\|") or "—"
 
 
+def _escape_dollar_outside_code(text: str) -> str:
+    """Экранировать `$` вне inline-кода. Внутри `` `...` `` экранирование не нужно и отображалось бы как «\\$»."""
+    parts = text.split("`")
+    if len(parts) % 2 == 0:  # непарные обратные кавычки — кода нет, экранируем всё
+        return text.replace("\\$", "$").replace("$", "\\$")
+    return "`".join(p if i % 2 else p.replace("\\$", "$").replace("$", "\\$") for i, p in enumerate(parts))
+
+
 def _md_finalize(value: Any) -> Any:
-    """Экранирование для Markdown: `$` (иначе просмотрщики с KaTeX/MathJax превращают текст между двумя `$`
-    — например, curl-команду с $BASE … $TOKEN — в формулу)."""
+    """Экранирование для Markdown: `$` вне inline-кода (иначе просмотрщики с KaTeX/MathJax превращают текст
+    между двумя `$` — например, curl-команду с $BASE … $TOKEN — в формулу)."""
     if isinstance(value, str):
-        return value.replace("\\$", "$").replace("$", "\\$")
+        return _escape_dollar_outside_code(value)
     return "" if value is None else value
 
 
@@ -352,7 +360,11 @@ def write_reports(report: AuditReport, out_path: str | Path, fmt: str = "auto") 
     """Записать отчёт в выбранных форматах. Возвращает (записанные файлы, ошибки). Не бросает исключений рендера."""
     out = Path(out_path)
     formats = resolve_formats(out, fmt)
-    out.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:  # нет прав, путь занят файлом, read-only ФС — без трейсбека
+        return [], [f"Не удалось создать каталог для отчёта «{out.parent}»: {exc.strerror or type(exc).__name__}. "
+                    "Укажите другой путь в --out."]
     written: list[Path] = []
     errors: list[str] = []
     renderers = {"md": render_markdown, "html": render_html, "json": render_json, "pdf": render_pdf}

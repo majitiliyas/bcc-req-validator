@@ -218,7 +218,9 @@ def test_report_layout_pdf_html_md(s: Settings, doc_path: Path, tmp_path: Path) 
     pdf = "".join(pg.get_text() for pg in pymupdf.open(tmp_path / "out" / "r.pdf"))
     assert "₸" not in pdf and "KZT" in pdf and "〒" not in pdf  # тенге в PDF — текстом
     assert "**" not in re.sub(r"<[^>]+>", "", html.split("<h2>2.")[1])  # цитаты в HTML без сырой разметки
-    assert "страниц:" not in md and ", тег" not in md  # .md без страниц; тега нет — поля нет
+    assert "страниц:" not in md  # для .md поле «страниц» не выводится
+    tag = report.passport.git_tag
+    assert (f", тег `{tag}`" in md) if tag else (", тег" not in md)  # пустой тег не выводится
     assert "| Деф. | Набор |" in md
     view = build_view(report)
     row = next(r for r in view["matrix"] if r["req_id"] == "REQ-005")

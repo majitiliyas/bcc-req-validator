@@ -23,7 +23,7 @@ python3 -m venv .venv && source .venv/bin/activate && pip install -e .
 **Демо без ключей и сети** (только детерминированные правила, вердикт предварительный):
 
 ```bash
-uv run req-validator analyze path/to/requirements.md --out reports/report.md --format md,pdf,html --demo
+uv run req-validator analyze tests/fixtures/flawed_fintech_srs.md --out reports/report.md --format md,pdf,html --demo
 ```
 
 **Боевой режим.** Нужен хотя бы один бесплатный ключ: [aistudio.google.com](https://aistudio.google.com/) → **Get API key**. Ключ вписывается в `.env`:

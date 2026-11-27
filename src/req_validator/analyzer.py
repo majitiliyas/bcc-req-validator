@@ -124,8 +124,10 @@ def run_audit(input_path: str | Path, *, demo: bool = True, settings: Settings |
     if not demo and reqs:
         outcome, llm_info = _run_llm(settings, doc, reqs, rule_defects, hints, tracer, transport, router, notes)
 
+    if outcome is not None:
+        hints = hints + outcome.llm_hints  # стилистические замечания LLM — только подсказки
     combined = rule_defects + (outcome.defects if outcome else [])
-    all_defects = deduplicate_by_fragment(combined)
+    all_defects = deduplicate_by_fragment(combined, reqs)
     if len(all_defects) < len(combined):
         notes.append(f"Снято повторов одного и того же фрагмента: {len(combined) - len(all_defects)}.")
     order = {r.req_id: i for i, r in enumerate(reqs)}

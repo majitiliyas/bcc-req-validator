@@ -89,6 +89,8 @@ class AuditContext:
     headings: list[DocumentBlock] = field(default_factory=list)  # заголовки разделов для привязки цитат
     blocks: list[DocumentBlock] = field(default_factory=list)  # все блоки документа (контекст вне требований)
     full_context: str = ""  # замаскированный полный текст документа, если он меньше порога
+    raw: str = ""  # исходный текст документа (для проверки цитат подсказок)
+    style_hints: list[Hint] = field(default_factory=list)
     llm_calls: int = 0
     cache_hits: int = 0
 
@@ -108,6 +110,7 @@ class LLMAuditOutcome:
     critic_stats: dict[str, int]
     funnel: list[tuple[str, int, str]] = field(default_factory=list)  # (этап, количество, пояснение)
     critic_pairs: dict[str, int] = field(default_factory=dict)  # «генератор → Критик» → число находок
+    llm_hints: list[Hint] = field(default_factory=list)  # стилистика (ISO-525-09): вне метрик, ROI и Критика
 
 
 # --------------------------------------------------------------------------- #
@@ -330,6 +333,7 @@ def _to_defect(finding: Any, *, rule_suffix: str, model: str, pass_name: str, by
     )
 
 
+STYLE_RULE = "ISO-525-09"
 _ARROW_KINDS = {RequirementKind.DESIGN, RequirementKind.BUSINESS}
 _ARROW_NITPICK_RULES = {"ISO-525-03", "ISO-525-04", "ISO-525-05", "ISO-525-07", "ISO-525-09"}
 
@@ -350,6 +354,7 @@ async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: Glob
 
     suppressed = [0]
     models: set[str] = set()
+    style_hints: list[Hint] = []
 
     async def run_batch(batch: list[Requirement]) -> tuple[list[Defect], set[str], str | None]:
         ids = {r.req_id for r in batch}
@@ -376,6 +381,15 @@ async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: Glob
             if f.req_id not in ids:
                 ctx.trace("finding_outside_batch", step=step, req_id=f.req_id)
                 continue
+            if f.rule_id == STYLE_RULE:
+                # «Нет модального глагола» и прочее оформление по шаблону — подсказка, а не дефект (как у правил).
+                req = by_id[f.req_id]
+                chk = verify_citation(f.verbatim_quote, ctx.raw, ctx.settings.citation_threshold,
+                                      handle_span=(req.start_char, req.end_char))
+                if chk.verified and chk.handle_ok is not False:
+                    style_hints.append(Hint(rule_id=f"{STYLE_RULE}/LLM", req_id=f.req_id, exact_quote=chk.matched_text,
+                                            message=f"{f.explanation} {f.suggestion}".strip()[:300]))
+                continue
             if _is_arrow_schema_nitpick(by_id[f.req_id], f.rule_id, f.severity):
                 suppressed[0] += 1
                 ctx.trace("arrow_schema_suppressed", step=step, req_id=f.req_id, rule=f.rule_id)
@@ -391,8 +405,11 @@ async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: Glob
     detail = f"батчей {len(results)}, проверено требований {len(checked)} из {len(reqs)}, находок {len(defects)}"
     if suppressed[0]:
         detail += f"; снято придирок к схемам-стрелкам: {suppressed[0]}"
+    if style_hints:
+        detail += f"; замечаний по шаблону (ISO-525-09) переведено в подсказки: {len(style_hints)}"
     if errors:
         detail += f"; неуспешных батчей {len(errors)}: " + "; ".join(errors[:2])
+    ctx.style_hints = style_hints
     return defects, checked, PassStatus(name="Pass 1 — проверка требований (п. 5.2.5)", status=status, detail=detail,
                                         llm_calls=ctx.llm_calls - calls0, cache_hits=ctx.cache_hits - hits0,
                                         items=len(results), models=sorted(models))
@@ -746,6 +763,7 @@ async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[R
         ctx.headings = headings
     if blocks is not None:
         ctx.blocks = blocks
+    ctx.raw = raw
     if len(raw.encode("utf-8")) <= ctx.settings.full_context_max_bytes:
         ctx.full_context = ctx.masker.mask(raw)
     passes: list[PassStatus] = []
@@ -782,4 +800,4 @@ async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[R
     ]
     return LLMAuditOutcome(defects=reviewed, rejected=rejected, passes=passes, checked_req_ids=checked,
                            set_checked=set_checked, registry=registry, critic_stats=critic_stats, funnel=funnel,
-                           critic_pairs=critic_pairs)
+                           critic_pairs=critic_pairs, llm_hints=list(ctx.style_hints))

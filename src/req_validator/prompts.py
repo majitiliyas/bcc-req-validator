@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from string import Template
 
@@ -21,10 +22,13 @@ UNTRUSTED_CLOSE = "</untrusted_document>"
 _FENCE_TAGS = ("untrusted_document", "full_document_context")
 
 
+_FENCE_RX = re.compile(r"<(\s*/?\s*)(" + "|".join(_FENCE_TAGS) + r")\b", re.IGNORECASE)
+
+
 def _neutralize(text: str) -> str:
-    for tag in _FENCE_TAGS:
-        text = text.replace(f"<{tag}", f"‹{tag}").replace(f"</{tag}", f"‹/{tag}")
-    return text
+    """Обезвредить открывающие и закрывающие теги ограждения в любом регистре и с пробелами:
+    «</UNTRUSTED_DOCUMENT>», «< / untrusted_document >» и т. п. → «‹…»."""
+    return _FENCE_RX.sub(lambda m: "‹" + m.group(1) + m.group(2), text)
 
 
 def spotlight(text: str) -> str:
