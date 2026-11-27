@@ -61,6 +61,10 @@
 <tr><th>Маскирование ПДн</th><td>{{ llm.pii }}</td></tr>
 <tr><th>Бюджет / реестр</th><td>{{ llm.budget }} · {{ llm.registry }}</td></tr>
 </table>
+<h4>Воронка качества и отсева галлюцинаций</h4>
+<table><tr><th>Этап</th><th>Кол-во</th><th style="width:30%"></th><th>Пояснение</th></tr>
+{% for f in llm.funnel %}<tr><td>{{ f.stage }}</td><td class="c">{{ f.count }}</td><td><div style="background:#3e63dd;height:10px;border-radius:2px;width:{{ (f.pct * 100)|round(1) }}%"></div></td><td class="muted">{{ f.note }}</td></tr>{% endfor %}
+</table>
 <table><tr><th>Проход</th><th>Статус</th><th>Модели</th><th>Вызовов / кэш</th><th>Детали</th></tr>
 {% for ps in llm.passes %}<tr><td>{{ ps.name }}</td><td>{{ ps.status }}</td><td>{{ ps.models }}</td><td class="c">{{ ps.calls }} / {{ ps.cache }}</td><td>{{ ps.detail }}</td></tr>{% endfor %}
 </table>
@@ -110,6 +114,17 @@
 <tr><th>Плотность дефектов / индекс готовности</th><td>{{ metrics.defect_density }} / {{ metrics.readiness_score }}</td></tr>
 <tr><th>Оценка сэкономленных трудозатрат</th><td>{{ metrics.estimated_saved_hours }} ч</td></tr>
 </table>
+{% if roi %}
+<h3>Бизнес-ценность (ROI)</h3>
+<p class="muted">Детерминированный расчёт на Decimal, без LLM. Коэффициенты — явные допущения (настраиваются в .env).</p>
+<table><tr><th>Статья</th><th>Расчёт</th><th>Часы</th></tr>
+{% for ln in roi.lines %}<tr><td>{{ ln.item }}</td><td>{{ ln.formula }}</td><td class="c">{{ ln.hours }}</td></tr>{% endfor %}
+<tr><th>Итого сэкономлено</th><td></td><td class="c"><b>{{ roi.total_hours }} ч</b></td></tr>
+<tr><th>В деньгах</th><td>{{ roi.total_hours }} ч × {{ roi.rate }} {{ roi.currency }}/ч</td><td class="c"><b>{{ roi.money }} {{ roi.currency }}</b></td></tr>
+<tr><th>Стоимость LLM-прогона</th><td colspan="2">{{ roi.llm_cost }}</td></tr>
+</table>
+<ul class="muted">{% for a in roi.assumptions %}<li>{{ a }}</li>{% endfor %}</ul>
+{% endif %}
 <h3>Критичные дефекты (FATAL и MAJOR)</h3>
 {% if critical %}<table><tr><th>ID</th><th>Уровень</th><th>Тип</th><th>Требование</th><th>Цитата</th><th>Суть</th><th>Проверка</th></tr>
 {% for x in critical %}<tr><td>{{ x.id }}</td><td><span class="badge {{ x.severity }}">{{ x.severity }}</span></td><td>{{ x.type }}</td><td>{{ x.req_id }}{% if x.related_req %} ↔ {{ x.related_req }}{% endif %}</td><td>«{{ x.quote }}»{% if x.related_quote %} ↔ «{{ x.related_quote }}»{% endif %}</td><td>{{ x.explanation }}</td><td>{{ x.source_label }}; {{ x.review }}</td></tr>

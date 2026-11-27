@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
@@ -22,7 +23,7 @@ from pydantic import BaseModel, ValidationError
 
 from .cache import DiskStepCache, canonical_json, sha256_hex
 from .config import Settings
-from .grounding import normalize_with_map, verify_citation
+from .grounding import HeadingAnchor, heading_anchor, normalize_with_map, verify_citation
 from .guards import GuardError, TraceLogger, estimate_tokens
 from .llm_schemas import (
     CriticOutput,
@@ -37,6 +38,7 @@ from .llm_schemas import (
 from .models import (
     Defect,
     DefectCategory,
+    DocumentBlock,
     FindingSource,
     Hint,
     PassStatus,
@@ -83,6 +85,7 @@ class AuditContext:
     cache: DiskStepCache
     tracer: TraceLogger | None = None
     masker: PiiMasker = field(default_factory=PiiMasker)
+    headings: list[DocumentBlock] = field(default_factory=list)  # заголовки разделов для привязки цитат
     llm_calls: int = 0
     cache_hits: int = 0
 
@@ -100,6 +103,7 @@ class LLMAuditOutcome:
     set_checked: bool
     registry: GlobalRegistry
     critic_stats: dict[str, int]
+    funnel: list[tuple[str, int, str]] = field(default_factory=list)  # (этап, количество, пояснение)
 
 
 # --------------------------------------------------------------------------- #
@@ -480,7 +484,10 @@ def _owner(reqs: list[Requirement], start: int, end: int) -> Requirement | None:
     return next((r for r in reqs if r.start_char <= start and end <= r.end_char), None)
 
 
-VerifiedQuote = tuple[str, int, int, str | None, str]  # (цитата, start, end, req_id владельца, заметка о привязке)
+# (цитата, start, end, req_id владельца, заметка о привязке, способ подтверждения)
+VerifiedQuote = tuple[str, int, int, str | None, str, str]
+METHOD_LABELS = {"exact": "точное совпадение", "normalized": "нормализованное совпадение",
+                 "fuzzy": "нечёткое совпадение (RapidFuzz)"}
 
 
 def _exact_owner(check: Any, reqs: list[Requirement], declared: str | None) -> tuple[Requirement | None, str]:
@@ -519,8 +526,12 @@ async def _verify_quote(ctx: AuditContext, quote: str, req_id: str | None, reqs:
     check = verify_citation(quote, raw, ctx.settings.citation_threshold, handle_span=span)
     if check.verified and check.handle_ok is not False and not (req is None and check.short):
         owner = req or _owner(reqs, check.start_char or 0, check.end_char or 0)
-        note = "" if req is not None or owner is None else _rebind_note(req_id, owner.req_id)
-        return check.matched_text, check.start_char or 0, check.end_char or 0, owner.req_id if owner else None, note
+        if owner is not None or req is not None:
+            note = "" if req is not None else _rebind_note(req_id, owner.req_id)  # type: ignore[union-attr]
+            method = "короткая точная цитата" if check.short else METHOD_LABELS[check.method]
+            return (check.matched_text, check.start_char or 0, check.end_char or 0,
+                    owner.req_id if owner else None, note, method)
+        # найдено в документе, но не внутри требования — пробуем заголовок раздела ниже
     if check.verified:  # найдено вне заявленного требования (или короткая цитата без хендла)
         owner, why = _exact_owner(check, reqs, declared)
         if owner is not None:
@@ -528,10 +539,17 @@ async def _verify_quote(ctx: AuditContext, quote: str, req_id: str | None, reqs:
                          if owner.start_char <= a and b <= owner.end_char), (check.start_char or 0, check.end_char or 0))
             note = _rebind_note(declared or req_id, owner.req_id) if owner.req_id != declared else ""
             ctx.trace("quote_rebound", declared=req_id, owner=owner.req_id, quote=quote[:60])
-            return raw[s:e], s, e, owner.req_id, note
+            return raw[s:e], s, e, owner.req_id, note, "перепривязка к требованию"
         reason = "; ".join(x for x in (reason, why) if x)
     else:
         reason = "; ".join(x for x in (reason, check.reason or "цитата не подтверждена") if x)
+    if not reason:
+        reason = "цитата найдена вне выделенных требований"
+    anchor = heading_anchor(quote, ctx.headings, reqs, raw)
+    if isinstance(anchor, HeadingAnchor):
+        note = anchor.note + (f"; заявлено {req_id}" if req_id and req_id != anchor.req_id else "")
+        ctx.trace("quote_heading_anchor", declared=req_id, owner=anchor.req_id, heading=anchor.heading[:60])
+        return anchor.quote, anchor.start_char, anchor.end_char, anchor.req_id, note, "через заголовок раздела"
     if req is None:
         return reason  # ремонтировать не к чему: нет текста-хендла
     repairs[0] += 1
@@ -548,16 +566,17 @@ async def _verify_quote(ctx: AuditContext, quote: str, req_id: str | None, reqs:
         return f"{reason}; при ремонте модель отозвала цитату"
     check = verify_citation(new_quote, raw, ctx.settings.citation_threshold, handle_span=(req.start_char, req.end_char))
     if check.verified and check.handle_ok is not False:
-        return check.matched_text, check.start_char or 0, check.end_char or 0, req.req_id, ""
+        return check.matched_text, check.start_char or 0, check.end_char or 0, req.req_id, "", "после ремонта цитаты"
     return f"{reason}; повторная цитата тоже не подтверждена ({check.reason})"
 
 
 async def grounding_gate(ctx: AuditContext, drafts: list[Defect], reqs: list[Requirement],
-                         raw: str) -> tuple[list[Defect], list[tuple[str, str]], int]:
+                         raw: str) -> tuple[list[Defect], list[tuple[str, str]], int, Counter[str]]:
     by_id = {r.req_id: r for r in reqs}
     accepted: list[Defect] = []
     rejected: list[tuple[str, str]] = []
     repairs = [0]
+    methods: Counter[str] = Counter()
     for i, d in enumerate(drafts):
         label = f"{d.pass_name}/{d.rule_id} {d.req_id or 'набор'}: «{d.exact_quote[:60]}»"
         tag = sha256_hex(f"{i}|{d.rule_id}|{d.req_id}|{d.exact_quote}")[:12]
@@ -566,7 +585,7 @@ async def grounding_gate(ctx: AuditContext, drafts: list[Defect], reqs: list[Req
             rejected.append((label, res))
             ctx.trace("grounding_reject", finding=label, reason=res)
             continue
-        quote, s, e, owner, note = res
+        quote, s, e, owner, note, method = res
         notes = [note] if note else []
         update: dict[str, Any] = {"exact_quote": quote, "quote_verified": True, "quote_start": s, "quote_end": e,
                                   "req_id": owner, "section_path": by_id[owner].heading_path if owner else d.section_path}
@@ -582,8 +601,9 @@ async def grounding_gate(ctx: AuditContext, drafts: list[Defect], reqs: list[Req
             update.update(related_quote=rel[0], related_quote_verified=True, related_req_ids=[rel[3]] if rel[3] else [])
         if notes:
             update["binding_note"] = "; ".join(notes)
+        methods[method] += 1
         accepted.append(d.model_copy(update=update))
-    return accepted, rejected, repairs[0]
+    return accepted, rejected, repairs[0], methods
 
 
 def _overlap(a: Defect, b: Defect) -> bool:
@@ -700,7 +720,10 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
 
 
 async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[Requirement],
-                        rule_defects: list[Defect], hints: list[Hint]) -> LLMAuditOutcome:
+                        rule_defects: list[Defect], hints: list[Hint],
+                        headings: list[DocumentBlock] | None = None) -> LLMAuditOutcome:
+    if headings is not None:
+        ctx.headings = headings
     passes: list[PassStatus] = []
     registry, st0 = await pass0_registry(ctx, title, reqs, raw)
     passes.append(st0)
@@ -710,7 +733,7 @@ async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[R
     passes.append(st2)
 
     calls0, hits0 = ctx.llm_calls, ctx.cache_hits
-    grounded, rejected, repairs = await grounding_gate(ctx, p1 + p2, reqs, raw)
+    grounded, rejected, repairs, methods = await grounding_gate(ctx, p1 + p2, reqs, raw)
     merged = merge_with_rules(rule_defects, grounded)
     passes.append(PassStatus(
         name="Pass 3a — Grounding Gate", status="ok",
@@ -720,5 +743,17 @@ async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[R
 
     reviewed, critic_stats, st3 = await critic_review(ctx, merged, reqs)
     passes.append(st3)
+    to_critic = critic_stats["reviewed"] + critic_stats["not_reviewed"]
+    funnel = [
+        ("Кандидаты LLM (Pass 1 + Pass 2)", len(p1) + len(p2), "находки моделей до любых проверок"),
+        ("Подтверждено цитатой", len(grounded), ", ".join(f"{k}: {v}" for k, v in methods.most_common()) or "—"),
+        ("Отклонено проверкой цитат", len(rejected), f"галлюцинации и неподтверждённые цитаты; ремонтов цитат: {repairs}"),
+        ("Снято как дубли правил", len(grounded) - len(merged), "тот же дефект уже найден детерминированно"),
+        ("Передано Критику (FATAL/MAJOR)", to_critic, "независимая проверка в чистом контексте"),
+        ("Критик подтвердил", critic_stats["confirmed"], ""),
+        ("Критик понизил", critic_stats["downgraded"], "дефект реален, критичность ниже"),
+        ("Критик отклонил", critic_stats["rejected"], "ложные придирки"),
+        ("MINOR без Критика", len(merged) - to_critic, "низкий риск — только проверка цитаты"),
+    ]
     return LLMAuditOutcome(defects=reviewed, rejected=rejected, passes=passes, checked_req_ids=checked,
-                           set_checked=set_checked, registry=registry, critic_stats=critic_stats)
+                           set_checked=set_checked, registry=registry, critic_stats=critic_stats, funnel=funnel)

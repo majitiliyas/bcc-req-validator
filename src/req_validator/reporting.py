@@ -175,6 +175,7 @@ def build_view(report: AuditReport) -> dict[str, Any]:
             "blocking": ", ".join(v.blocking_defect_ids),
         },
         "llm": _llm_view(report),
+        "roi": _roi_view(report),
         "criteria": [{"rule_id": c.rule_id, "name": c.name_ru, "short": CRITERION_SHORT[c.rule_id], "reference": c.reference,
                       "definition": c.definition, "coverage": c.rules_coverage or "только LLM (Спринт 2)"} for c in SINGLE_CRITERIA],
         "set_criteria": [{"rule_id": c.rule_id, "name": c.name_ru, "reference": c.reference} for c in SET_CRITERIA],
@@ -206,6 +207,29 @@ def _llm_view(report: AuditReport) -> dict[str, Any] | None:
         "pii": ", ".join(f"{k}: {v}" for k, v in info.pii_masked.items()) or "не обнаружено",
         "budget": ", ".join(f"{k}: {v}" for k, v in info.budget.items()),
         "registry": ", ".join(f"{k}: {v}" for k, v in info.registry_size.items()) or "—",
+        "funnel": _funnel_view(info.funnel),
+    }
+
+
+def _funnel_view(stages: list[Any]) -> list[dict[str, Any]]:
+    top = max((st.count for st in stages), default=0) or 1
+    return [{"stage": st.stage, "count": st.count, "note": st.note, "pct": round(st.count / top, 3),
+             "bar": "█" * max(1 if st.count else 0, round(20 * st.count / top))} for st in stages]
+
+
+def _num(value: float, digits: int = 0) -> str:
+    text = f"{value:,.{digits}f}".replace(",", " ")
+    return text
+
+
+def _roi_view(report: AuditReport) -> dict[str, Any] | None:
+    roi = report.roi
+    if roi is None:
+        return None
+    return {
+        "lines": [{"item": ln.item, "formula": ln.formula, "hours": _num(ln.hours, 1)} for ln in roi.lines],
+        "total_hours": _num(roi.total_hours, 1), "rate": _num(roi.hourly_rate), "currency": roi.currency,
+        "money": _num(roi.total_money), "assumptions": roi.assumptions, "llm_cost": roi.llm_cost,
     }
 
 

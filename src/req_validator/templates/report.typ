@@ -77,6 +77,13 @@
     [Маскирование ПДн], [#d.llm.pii],
     [Бюджет / реестр], [#d.llm.budget · #d.llm.registry],
   )
+  *Воронка качества и отсева галлюцинаций*
+  #table(columns: (5cm, 1.2cm, 4cm, 1fr), align: (left, right, left, left),
+    [Этап], [Кол-во], [], [Пояснение],
+    ..d.llm.funnel.map(f => (f.stage, str(f.count),
+      box(width: 4cm * f.pct, height: 7pt, fill: rgb("#3e63dd"), radius: 1pt),
+      text(size: 8pt, fill: luma(90), f.note))).flatten(),
+  )
   #table(columns: (3.6cm, 1.5cm, 3.2cm, 1.5cm, 1fr),
     [Проход], [Статус], [Модели], [Вызовы / кэш], [Детали],
     ..d.llm.passes.map(ps => (ps.name, ps.raw_status, text(size: 7.5pt, ps.models),
@@ -155,6 +162,20 @@
   [Индекс готовности (S_DoR)], [#str(m.readiness_score) / 100],
   [Сэкономленные трудозатраты], [#str(m.estimated_saved_hours) ч],
 )
+
+#if d.roi != none [
+  === Бизнес-ценность (ROI)
+  #text(size: 8.5pt, fill: luma(90))[Детерминированный расчёт на Decimal, без LLM. Коэффициенты — явные допущения (настраиваются в .env).]
+  #table(columns: (6cm, 1fr, 2.2cm), align: (left, left, right),
+    [Статья], [Расчёт], [Часы],
+    ..d.roi.lines.map(ln => (ln.item, ln.formula, ln.hours)).flatten(),
+    [*Итого сэкономлено*], [], [*#d.roi.total_hours ч*],
+    [*В деньгах*], [#d.roi.total_hours ч × #d.roi.rate #d.roi.currency/ч], [*#d.roi.money #d.roi.currency*],
+    [Стоимость LLM-прогона], [#d.roi.llm_cost], [—],
+  )
+  #for a in d.roi.assumptions [- #text(size: 8.5pt, a)
+  ]
+]
 
 === Критичные дефекты (FATAL и MAJOR)
 #if d.critical.len() == 0 [Критичных дефектов не найдено.] else [

@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field
 from rapidfuzz import fuzz
 from simpleeval import SimpleEval
 
-from .models import Defect, Requirement
+from .models import Defect, DocumentBlock, Requirement
 
 DEFAULT_THRESHOLD = 85.0
 MIN_QUOTE_CHARS = 5  # короче — только точное совпадение целым токеном (см. _verify_short)
@@ -416,3 +416,48 @@ def deduplicate_by_fragment(defects: Iterable[Defect]) -> list[Defect]:
             best = best.model_copy(update={"review_note": note})
         out.append(best)
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Привязка через заголовок раздела
+# --------------------------------------------------------------------------- #
+
+
+class HeadingAnchor(BaseModel):
+    req_id: str = Field(description="Первое требование раздела, к которому привязана цитата")
+    heading: str
+    start_char: int
+    end_char: int
+    quote: str = Field(description="Дословный текст заголовка в документе")
+    note: str
+
+
+def _plain_heading(text: str) -> str:
+    from .segmenter import strip_markdown
+
+    return " ".join(strip_markdown(text.strip().lstrip("#").strip()).split())
+
+
+def heading_anchor(quote: str, headings: Iterable[DocumentBlock], requirements: Iterable[Requirement],
+                   source_text: str) -> HeadingAnchor | str:
+    """Цитата, дословно равная заголовку раздела (не являющемуся требованием), привязывается к ПЕРВОМУ
+    требованию этого раздела. Только точное равенство текста заголовка (без учёта markdown-разметки и пробелов,
+    с учётом регистра); частичные и нечёткие совпадения не принимаются. Возвращает якорь или причину отказа."""
+    target = _plain_heading(quote or "")
+    if len(target) < MIN_SHORT_QUOTE_CHARS:
+        return "цитата пуста"
+    matches = [h for h in headings if h.heading_titles and _plain_heading(h.heading_titles[-1]) == target]
+    if not matches:
+        return "цитата не совпадает ни с одним заголовком раздела"
+    if len(matches) > 1:
+        return f"заголовок «{target}» встречается в документе {len(matches)} раза — привязка неоднозначна"
+    h = matches[0]
+    path = h.heading_path
+    first = next((r for r in requirements if r.heading_path == path or r.heading_path.startswith(path + " > ")), None)
+    if first is None:
+        return f"в разделе «{target}» нет выделенных требований"
+    title = h.heading_titles[-1]
+    idx = source_text.find(title, h.start_char, h.end_char)
+    s, e = (idx, idx + len(title)) if idx >= 0 else (h.start_char, h.end_char)
+    note = f"Привязано через заголовок раздела «{title}» к {first.req_id} (первое требование раздела)"
+    return HeadingAnchor(req_id=first.req_id, heading=title, start_char=s, end_char=e, quote=source_text[s:e], note=note)

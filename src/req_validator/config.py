@@ -61,6 +61,14 @@ class Settings(BaseSettings):
     max_validation_retries: int = Field(default=2, ge=0, le=3)
     use_presidio: bool = True
 
+    # --- оценка бизнес-ценности (ROI), детерминированно; все коэффициенты — допущения, выводятся в отчёт ---
+    roi_review_minutes_per_req: float = Field(default=6.0, ge=0, description="Ручное ревью одного требования, мин")
+    roi_rework_hours_fatal: float = Field(default=16.0, ge=0, description="Rework на FATAL при позднем обнаружении, ч")
+    roi_rework_hours_major: float = Field(default=6.0, ge=0)
+    roi_rework_hours_minor: float = Field(default=1.0, ge=0)
+    roi_hourly_rate: float = Field(default=10_000.0, ge=0, description="Стоимость часа команды (допущение)")
+    roi_currency: str = "₸"
+
     # --- прочее ---
     cache_dir: Path = Path(".cache")
     use_cache: bool = True

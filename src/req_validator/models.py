@@ -261,6 +261,12 @@ class PassStatus(BaseModel):
     models: list[str] = Field(default_factory=list, description="Модели, выдавшие валидный ответ в этом проходе")
 
 
+class FunnelStage(BaseModel):
+    stage: str
+    count: int
+    note: str = ""
+
+
 class LLMRunInfo(BaseModel):
     groups: dict[str, list[str]] = Field(default_factory=dict, description="Сконфигурированные деплойменты групп")
     models_used: dict[str, int] = Field(default_factory=dict, description="Модель → число успешных вызовов")
@@ -278,6 +284,7 @@ class LLMRunInfo(BaseModel):
     pii_masked: dict[str, int] = Field(default_factory=dict)
     budget: dict[str, object] = Field(default_factory=dict)
     registry_size: dict[str, int] = Field(default_factory=dict)
+    funnel: list[FunnelStage] = Field(default_factory=list, description="Воронка качества и отсева галлюцинаций")
 
 
 class RunPassport(BaseModel):
@@ -336,6 +343,24 @@ class Verdict(BaseModel):
     gate: str = Field(default="", description="Сработавший гейт: FATAL_GATE | SCORE | UNREVIEWED_FATAL | —")
 
 
+class RoiLine(BaseModel):
+    item: str
+    formula: str
+    hours: float
+
+
+class RoiEstimate(BaseModel):
+    """Детерминированная оценка бизнес-ценности (Decimal → float только для вывода)."""
+
+    lines: list[RoiLine]
+    total_hours: float
+    hourly_rate: float
+    currency: str
+    total_money: float
+    assumptions: list[str]
+    llm_cost: str
+
+
 class AuditReport(BaseModel):
     passport: RunPassport
     requirements: list[Requirement]
@@ -345,6 +370,7 @@ class AuditReport(BaseModel):
     metrics: SummaryMetrics
     verdict: Verdict
     remediation_plan: list[RemediationItem]
+    roi: RoiEstimate | None = None
 
     def defect(self, defect_id: str) -> Defect | None:
         return next((d for d in self.defects if d.defect_id == defect_id), None)

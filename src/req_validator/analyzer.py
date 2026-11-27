@@ -25,6 +25,9 @@ from .models import (
     Defect,
     Hint,
     IngestionResult,
+    BlockType,
+    FunnelStage,
+    FindingSource,
     LLMRunInfo,
     PassStatus,
     RunPassport,
@@ -34,7 +37,14 @@ from .pii import PiiMasker, mask_pii  # noqa: F401 — mask_pii реэкспор
 from .prompts import prompt_versions
 from .router import LLMRouter, Transport
 from .rules import check_requirement, check_set
-from .scoring import assess_requirements, assess_set, build_remediation, compute_metrics, decide_verdict
+from .scoring import (
+    assess_requirements,
+    assess_set,
+    build_remediation,
+    compute_metrics,
+    compute_roi,
+    decide_verdict,
+)
 from .segmenter import segment
 
 DEMO_MODEL_LABEL = "нет (демо-режим: детерминированные правила, без LLM и сети)"
@@ -137,10 +147,17 @@ def run_audit(input_path: str | Path, *, demo: bool = True, settings: Settings |
         model = ", ".join(f"{m} ×{n}" for m, n in sorted(llm_info.models_used.items(), key=lambda kv: -kv[1]))
     else:
         model = "LLM недоступна — отчёт построен детерминированным слоем"
+    if llm_info is not None and outcome is not None:
+        final_llm = sum(1 for d in defects if d.source == FindingSource.LLM)
+        llm_info.funnel = [FunnelStage(stage=s, count=c, note=n) for s, c, n in outcome.funnel]
+        llm_info.funnel.append(FunnelStage(stage="Итог: находок LLM в отчёте", count=final_llm,
+                                           note="после Критика и снятия повторов одного фрагмента"))
     passport = _passport(doc, run_id, started, t0, demo, model, commit, tag, notes)
     passport.llm = llm_info
+    tokens = (llm_info.prompt_tokens, llm_info.completion_tokens) if llm_info else None
     return AuditReport(passport=passport, requirements=reqs, assessments=assessments, set_assessment=set_assessment,
-                       defects=defects, metrics=metrics, verdict=verdict, remediation_plan=build_remediation(defects))
+                       defects=defects, metrics=metrics, verdict=verdict, remediation_plan=build_remediation(defects),
+                       roi=compute_roi(metrics, settings, llm_tokens=tokens))
 
 
 def _run_llm(settings: Settings, doc: IngestionResult, reqs: list, rule_defects: list[Defect], hints: list[Hint],
@@ -162,8 +179,9 @@ def _run_llm(settings: Settings, doc: IngestionResult, reqs: list, rule_defects:
             notes.append("LLM-проходы пропущены: нет ни одного доступного провайдера (ключи не заданы).")
             info.passes = [PassStatus(name="LLM-проходы", status="skipped", detail="нет провайдеров")]
             return None, info
+        headings = [b for b in doc.blocks if b.block_type == BlockType.HEADING]
         outcome = asyncio.run(run_llm_audit(ctx, title=doc.title or doc.file_name, raw=doc.raw_markdown, reqs=reqs,
-                                            rule_defects=rule_defects, hints=hints))
+                                            rule_defects=rule_defects, hints=hints, headings=headings))
     except Exception as exc:  # noqa: BLE001 — LLM-слой не должен ронять прогон
         tracer.event("llm_pipeline_error", error=f"{type(exc).__name__}: {exc}"[:400])
         notes.append(f"LLM-аудит прерван ({type(exc).__name__}: {str(exc)[:160]}); отчёт построен детерминированным слоем.")

@@ -51,6 +51,14 @@
 | Бюджет прогона | {{ llm.budget | cell }} |
 | Глобальный реестр (Pass 0) | {{ llm.registry | cell }} |
 
+**Воронка качества и отсева галлюцинаций**
+
+| Этап | Кол-во | | Пояснение |
+| :--- | ---: | :--- | :--- |
+{% for f in llm.funnel %}
+| {{ f.stage }} | {{ f.count }} | `{{ f.bar }}` | {{ f.note | cell }} |
+{% endfor %}
+
 | Проход | Статус | Модели | Вызовов / кэш | Детали |
 | :--- | :--- | :--- | :---: | :--- |
 {% for ps in llm.passes %}
@@ -172,6 +180,26 @@
 | Индекс готовности (S_DoR) | {{ metrics.readiness_score }} / 100 |
 | Оценка сэкономленных трудозатрат | {{ metrics.estimated_saved_hours }} ч |
 
+{% if roi %}
+### Бизнес-ценность (ROI)
+
+Детерминированный расчёт на `Decimal`, без LLM. Коэффициенты — явные допущения, настраиваются в `.env`.
+
+| Статья | Расчёт | Часы |
+| :--- | :--- | ---: |
+{% for ln in roi.lines %}
+| {{ ln.item }} | {{ ln.formula | cell }} | {{ ln.hours }} |
+{% endfor %}
+| **Итого сэкономлено** | | **{{ roi.total_hours }} ч** |
+| **В деньгах** | {{ roi.total_hours }} ч × {{ roi.rate }} {{ roi.currency }}/ч | **{{ roi.money }} {{ roi.currency }}** |
+| Стоимость LLM-прогона | {{ roi.llm_cost | cell }} | — |
+
+Допущения:
+{% for a in roi.assumptions %}
+- {{ a }}
+{% endfor %}
+
+{% endif %}
 ### Критичные дефекты (FATAL и MAJOR)
 
 {% if critical %}
