@@ -115,6 +115,9 @@
 {% if x.related_quote %}
   - **Противоречит ({{ x.related_req }}):** «{{ x.related_quote | cell }}»
 {% endif %}
+{% if x.binding_note %}
+  - **Привязка:** {{ x.binding_note }}
+{% endif %}
 
   - **Проблема:** {{ x.explanation }}
   - **Риск:** {{ x.risk }}
@@ -147,6 +150,9 @@
   - **Цитата:** «{{ x.quote | cell }}»
 {% if x.related_quote %}
   - **Противоречит ({{ x.related_req }}):** «{{ x.related_quote | cell }}»
+{% endif %}
+{% if x.binding_note %}
+  - **Привязка:** {{ x.binding_note }}
 {% endif %}
   - **Проблема:** {{ x.explanation }}
   - **Как исправить:** {{ x.suggestion }}

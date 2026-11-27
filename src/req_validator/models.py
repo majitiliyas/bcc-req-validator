@@ -195,6 +195,7 @@ class Defect(BaseModel):
     original_severity: Severity | None = None
     model: str | None = Field(default=None, description="Модель, сгенерировавшая находку")
     pass_name: str | None = Field(default=None, description="pass1 | pass2 | rules")
+    binding_note: str = Field(default="", description="Скорректированная привязка к требованию (ID/ссылка)")
 
     @property
     def priority(self) -> str:

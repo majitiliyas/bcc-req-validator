@@ -26,7 +26,8 @@ from simpleeval import SimpleEval
 from .models import Defect, Requirement
 
 DEFAULT_THRESHOLD = 85.0
-MIN_QUOTE_CHARS = 5
+MIN_QUOTE_CHARS = 5  # короче — только точное совпадение целым токеном (см. _verify_short)
+MIN_SHORT_QUOTE_CHARS = 2
 
 # --------------------------------------------------------------------------- #
 # Нормализация с картой индексов
@@ -101,6 +102,9 @@ class CitationCheck(BaseModel):
     numbers_ok: bool = True
     handle_ok: bool | None = Field(default=None, description="Найдена ли цитата внутри указанного требования")
     reason: str = ""
+    short: bool = Field(default=False, description="Короткая цитата (< 5 символов), проверена точным совпадением")
+    spans: list[tuple[int, int]] = Field(default_factory=list,
+                                         description="Все точные вхождения короткой цитаты в документе")
 
 
 def _search(quote: str, source: str, offset: int, threshold: float) -> CitationCheck | None:
@@ -147,8 +151,9 @@ def verify_citation(
     3. Числа в цитате и в найденном фрагменте должны совпасть как мультимножества,
        иначе цитата отклоняется (никакой подмены значений).
     """
-    if not quote or len(" ".join(quote.split())) < MIN_QUOTE_CHARS:
-        return CitationCheck(verified=False, method="none", score=0.0, reason="Цитата пустая или короче 5 символов.")
+    clean = " ".join((quote or "").split())
+    if len(clean) < MIN_QUOTE_CHARS:
+        return _verify_short(clean, source_text, handle_span)
 
     check: CitationCheck | None = None
     handle_ok: bool | None = None
@@ -174,6 +179,29 @@ def verify_citation(
     if handle_ok is False:
         check.reason = "Цитата найдена в документе, но вне указанного требования."
     return check
+
+
+def _verify_short(quote: str, source_text: str, handle_span: tuple[int, int] | None) -> CitationCheck:
+    """Короткая цитата (`GET`, `404`, `OK`): принимается ТОЛЬКО точным совпадением целым токеном,
+    без нормализации и нечёткого поиска. Сначала — внутри требования-хендла; иначе возвращаются все
+    вхождения в документе (`spans`), чтобы вызывающий код мог однозначно перепривязать находку."""
+    if len(quote) < MIN_SHORT_QUOTE_CHARS or not any(ch.isalnum() for ch in quote):
+        return CitationCheck(verified=False, method="none", score=0.0,
+                             reason="Цитата пустая или слишком короткая для однозначной проверки.")
+    rx = re.compile(rf"(?<!\w){re.escape(quote)}(?!\w)")
+    spans = [(m.start(), m.end()) for m in rx.finditer(source_text)]
+    if not spans:
+        return CitationCheck(verified=False, method="none", score=0.0, short=True,
+                             handle_ok=False if handle_span else None,
+                             reason="Короткая цитата не найдена в документе точным совпадением.")
+    inside = [sp for sp in spans if handle_span and handle_span[0] <= sp[0] and sp[1] <= handle_span[1]]
+    s, e = inside[0] if inside else spans[0]
+    handle_ok = bool(inside) if handle_span is not None else None
+    return CitationCheck(
+        verified=True, method="exact", score=100.0, matched_text=source_text[s:e], start_char=s, end_char=e,
+        handle_ok=handle_ok, short=True, spans=spans,
+        reason="" if handle_ok is not False else "Короткая цитата найдена в документе, но вне указанного требования.",
+    )
 
 
 def ground_defects(
@@ -214,7 +242,8 @@ def ground_defects(
             if owner is None:
                 rejected.append((d, "Цитата не относится ни к одному выделенному требованию."))
                 continue
-            update.update(req_id=owner.req_id, section_path=owner.heading_path)
+            update.update(req_id=owner.req_id, section_path=owner.heading_path,
+                          binding_note=f"ID скорректирован: {d.req_id} → {owner.req_id} (цитата найдена в {owner.req_id})")
         accepted.append(d.model_copy(update=update))
     return accepted, rejected
 

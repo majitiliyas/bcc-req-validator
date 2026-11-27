@@ -86,7 +86,7 @@
 {% for x in d.defects %}
 <div class="defect"><p><span class="badge {{ x.severity }}">{{ x.severity }}</span> <code>{{ x.id }}</code> {{ x.criterion }} (<code>{{ x.rule_id }}</code>), приоритет {{ x.priority }} <span class="muted">· {{ x.source_label }} · {{ x.review }}{% if x.original_severity %} (было {{ x.original_severity }}){% endif %}</span></p>
 <p><b>Цитата:</b> «{{ x.quote }}»{% if x.verified %} <span class="muted">(проверена, позиция {{ x.position }})</span>{% endif %}</p>
-{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_quote }}»</p>{% endif %}
+{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_quote }}»</p>{% endif %}{% if x.binding_note %}<p class="muted"><b>Привязка:</b> {{ x.binding_note }}</p>{% endif %}
 <p><b>Проблема:</b> {{ x.explanation }}</p><p><b>Риск:</b> {{ x.risk }}</p><p><b>Как исправить:</b> {{ x.suggestion }}</p>{% if x.review_note %}<p class="muted">{{ x.review_note }}</p>{% endif %}</div>
 {% endfor %}
 {% for h in d.hints %}<p class="hint">⚠️ Подсказка (<code>{{ h.rule_id }}</code>): {{ h.message }} — «{{ h.quote }}»</p>{% endfor %}
@@ -98,7 +98,7 @@
 {% endfor %}</table>
 {% for x in set_defects %}
 <div class="defect"><p><span class="badge {{ x.severity }}">{{ x.severity }}</span> <code>{{ x.id }}</code> {{ x.criterion }} (<code>{{ x.rule_id }}</code>) <span class="muted">· {{ x.source_label }} · {{ x.review }}</span></p>
-<p><b>Цитата:</b> «{{ x.quote }}»</p>{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_quote }}»</p>{% endif %}<p><b>Проблема:</b> {{ x.explanation }}</p><p><b>Как исправить:</b> {{ x.suggestion }}</p></div>
+<p><b>Цитата:</b> «{{ x.quote }}»</p>{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_quote }}»</p>{% endif %}{% if x.binding_note %}<p class="muted"><b>Привязка:</b> {{ x.binding_note }}</p>{% endif %}<p><b>Проблема:</b> {{ x.explanation }}</p><p><b>Как исправить:</b> {{ x.suggestion }}</p></div>
 {% endfor %}
 
 <h2>4. Сводка</h2>

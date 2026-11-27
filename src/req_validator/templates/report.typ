@@ -114,6 +114,7 @@
       #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) · #f.priority · #text(fill: luma(100), f.source_label + "; " + f.review) \
       _Цитата:_ «#f.quote» \
       #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_quote» \ ]
+      #if f.binding_note != "" [#text(fill: luma(100))[_Привязка:_ #f.binding_note] \ ]
       _Проблема:_ #f.explanation \
       _Риск:_ #f.risk \
       _Как исправить:_ #f.suggestion
@@ -136,6 +137,7 @@
   #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) · #text(fill: luma(100), f.source_label + "; " + f.review) \
   _Цитата:_ «#f.quote» \
   #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_quote» \ ]
+  #if f.binding_note != "" [#text(fill: luma(100))[_Привязка:_ #f.binding_note] \ ]
   _Проблема:_ #f.explanation \
   _Как исправить:_ #f.suggestion
   #v(3pt)

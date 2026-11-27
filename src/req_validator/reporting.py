@@ -100,6 +100,7 @@ def _source_label(d: Defect) -> str:
 def _defect_view(d: Defect) -> dict[str, Any]:
     return {
         "source_label": _source_label(d), "review": REVIEW_TEXT[d.review_status], "review_note": d.review_note,
+        "binding_note": d.binding_note,
         "related_quote": d.related_quote or "", "related_req": ", ".join(d.related_req_ids) or "",
         "original_severity": d.original_severity.value if d.original_severity else "",
         "id": d.defect_id, "severity": d.severity.value, "priority": d.priority, "rule_id": d.rule_id,

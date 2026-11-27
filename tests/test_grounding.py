@@ -90,6 +90,8 @@ def test_ground_defects_rejects_unknown_handle_and_reassigns() -> None:
     accepted, rejected = ground_defects(defects, [r1, r2], SOURCE)
     assert [d.req_id for d in accepted] == ["REQ-001", "REQ-002"]
     assert all(d.quote_verified and d.quote_start is not None for d in accepted)
+    assert accepted[0].binding_note == ""
+    assert accepted[1].binding_note.startswith("ID скорректирован: REQ-001 → REQ-002")
     assert len(rejected) == 2
 
 

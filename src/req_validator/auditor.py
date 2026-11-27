@@ -480,20 +480,58 @@ def _owner(reqs: list[Requirement], start: int, end: int) -> Requirement | None:
     return next((r for r in reqs if r.start_char <= start and end <= r.end_char), None)
 
 
+VerifiedQuote = tuple[str, int, int, str | None, str]  # (цитата, start, end, req_id владельца, заметка о привязке)
+
+
+def _exact_owner(check: Any, reqs: list[Requirement], declared: str | None) -> tuple[Requirement | None, str]:
+    """Однозначный владелец точной цитаты. Нечёткие совпадения не перепривязываются."""
+    if check.method not in ("exact", "normalized"):
+        return None, "цитата найдена вне требования только нечётко — перепривязка не выполняется"
+    spans = check.spans or [(check.start_char or 0, check.end_char or 0)]
+    owners = {o.req_id: o for sp in spans if (o := _owner(reqs, sp[0], sp[1])) is not None}
+    if len(owners) == 1:
+        return next(iter(owners.values())), ""
+    if not owners:
+        return None, "цитата найдена вне выделенных требований"
+    return None, (f"короткая цитата неоднозначна: встречается в {len(owners)} требованиях "
+                  f"({', '.join(sorted(owners)[:4])})" + (f", заявлено {declared}" if declared else ""))
+
+
+def _rebind_note(declared: str | None, owner: str) -> str:
+    if declared:
+        return f"ID скорректирован: {declared} → {owner} (цитата дословно найдена в требовании {owner})"
+    return f"Привязано к {owner} по дословной цитате"
+
+
 async def _verify_quote(ctx: AuditContext, quote: str, req_id: str | None, reqs: list[Requirement],
                         by_id: dict[str, Requirement], raw: str, explanation: str, tag: str,
-                        repairs: list[int]) -> tuple[str, int, int, str | None] | str:
-    """Проверить цитату в рамках хендла; при провале — 1 целевой ремонт. Вернуть (цитата, s, e, req_id) или причину."""
+                        repairs: list[int]) -> VerifiedQuote | str:
+    """Проверить цитату в рамках хендла.
+
+    * точное совпадение в заявленном требовании — принимается (в т.ч. короткое, например «GET»);
+    * точное совпадение в ДРУГОМ требовании — находка перепривязывается к нему с заметкой;
+    * иначе — 1 целевой ремонт цитаты у модели; при повторном провале — отклонение.
+    """
     req = by_id.get(req_id) if req_id else None
-    if req_id and req is None:
-        reason = f"неизвестный хендл {req_id}"
+    declared = req_id if req is not None else None
+    reason = f"неизвестный хендл {req_id}" if req_id and req is None else ""
+    span = (req.start_char, req.end_char) if req else None
+    check = verify_citation(quote, raw, ctx.settings.citation_threshold, handle_span=span)
+    if check.verified and check.handle_ok is not False and not (req is None and check.short):
+        owner = req or _owner(reqs, check.start_char or 0, check.end_char or 0)
+        note = "" if req is not None or owner is None else _rebind_note(req_id, owner.req_id)
+        return check.matched_text, check.start_char or 0, check.end_char or 0, owner.req_id if owner else None, note
+    if check.verified:  # найдено вне заявленного требования (или короткая цитата без хендла)
+        owner, why = _exact_owner(check, reqs, declared)
+        if owner is not None:
+            s, e = next(((a, b) for a, b in (check.spans or [(check.start_char or 0, check.end_char or 0)])
+                         if owner.start_char <= a and b <= owner.end_char), (check.start_char or 0, check.end_char or 0))
+            note = _rebind_note(declared or req_id, owner.req_id) if owner.req_id != declared else ""
+            ctx.trace("quote_rebound", declared=req_id, owner=owner.req_id, quote=quote[:60])
+            return raw[s:e], s, e, owner.req_id, note
+        reason = "; ".join(x for x in (reason, why) if x)
     else:
-        span = (req.start_char, req.end_char) if req else None
-        check = verify_citation(quote, raw, ctx.settings.citation_threshold, handle_span=span)
-        if check.verified and check.handle_ok is not False:
-            owner = req or _owner(reqs, check.start_char or 0, check.end_char or 0)
-            return check.matched_text, check.start_char or 0, check.end_char or 0, owner.req_id if owner else None
-        reason = check.reason or "цитата не подтверждена"
+        reason = "; ".join(x for x in (reason, check.reason or "цитата не подтверждена") if x)
     if req is None:
         return reason  # ремонтировать не к чему: нет текста-хендла
     repairs[0] += 1
@@ -510,7 +548,7 @@ async def _verify_quote(ctx: AuditContext, quote: str, req_id: str | None, reqs:
         return f"{reason}; при ремонте модель отозвала цитату"
     check = verify_citation(new_quote, raw, ctx.settings.citation_threshold, handle_span=(req.start_char, req.end_char))
     if check.verified and check.handle_ok is not False:
-        return check.matched_text, check.start_char or 0, check.end_char or 0, req.req_id
+        return check.matched_text, check.start_char or 0, check.end_char or 0, req.req_id, ""
     return f"{reason}; повторная цитата тоже не подтверждена ({check.reason})"
 
 
@@ -528,7 +566,8 @@ async def grounding_gate(ctx: AuditContext, drafts: list[Defect], reqs: list[Req
             rejected.append((label, res))
             ctx.trace("grounding_reject", finding=label, reason=res)
             continue
-        quote, s, e, owner = res
+        quote, s, e, owner, note = res
+        notes = [note] if note else []
         update: dict[str, Any] = {"exact_quote": quote, "quote_verified": True, "quote_start": s, "quote_end": e,
                                   "req_id": owner, "section_path": by_id[owner].heading_path if owner else d.section_path}
         if d.related_quote:
@@ -538,7 +577,11 @@ async def grounding_gate(ctx: AuditContext, drafts: list[Defect], reqs: list[Req
                 rejected.append((label, "вторая цитата противоречия: " + rel))
                 ctx.trace("grounding_reject", finding=label, reason="related: " + rel)
                 continue
+            if rel[4]:
+                notes.append("вторая цитата: " + rel[4])
             update.update(related_quote=rel[0], related_quote_verified=True, related_req_ids=[rel[3]] if rel[3] else [])
+        if notes:
+            update["binding_note"] = "; ".join(notes)
         accepted.append(d.model_copy(update=update))
     return accepted, rejected, repairs[0]
 
