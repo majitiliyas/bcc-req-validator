@@ -1,0 +1,23 @@
+# Секреты
+.env
+.env.*
+!.env.example
+
+# Окружение и кэши
+.venv/
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# Результаты прогонов (отчёт сдаётся отдельно от репозитория)
+reports/
+out/
+
+# ОС / IDE
+.DS_Store
+.idea/
+.vscode/

@@ -1,0 +1,43 @@
+[project]
+name = "req-validator"
+version = "0.1.0"
+description = "CLI-агент статической проверки требований (SRS/BRD) по ISO/IEC/IEEE 29148:2018 и IEEE Std 830-1998"
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "typer>=0.15",
+    "rich>=13.9",
+    "charset-normalizer>=3.4",
+    "markdown-it-py>=3.0",
+    "pymupdf>=1.25",
+    "pymupdf4llm>=0.0.17",
+    "rapidfuzz>=3.10",
+    "simpleeval>=1.0",
+    "jinja2>=3.1",
+    "typst>=0.12",
+    "openai>=1.60",
+    "google-genai>=1.20",
+]
+
+[project.optional-dependencies]
+ocr = ["rapidocr-onnxruntime>=1.4"]
+
+[project.scripts]
+req-validator = "req_validator.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/req_validator"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+filterwarnings = ["ignore::DeprecationWarning"]

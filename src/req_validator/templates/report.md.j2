@@ -1,0 +1,156 @@
+# Отчёт о проверке требований: {{ title }}
+
+> {{ verdict.icon }} **Итог: {{ verdict.text }}** · индекс готовности **{{ metrics.readiness_score }}/100** · требований: **{{ metrics.total_requirements }}** · дефектов: **{{ metrics.total_defects }}** (FATAL {{ metrics.fatal_count }} / MAJOR {{ metrics.major_count }} / MINOR {{ metrics.minor_count }})
+{% if verdict.preliminary %}
+>
+> ⚠️ Вердикт предварительный: в режиме «{{ passport.mode }}» выполнены только детерминированные проверки. Критерии, отмеченные ◻️, требуют семантического (LLM) прохода.
+{% endif %}
+
+## Паспорт прогона
+
+| Параметр | Значение |
+| :--- | :--- |
+| Документ | {{ passport.document_title | cell }} |
+| Файл | `{{ passport.file_name | cell }}` ({{ passport.file_size }} байт, формат: {{ passport.format }}, кодировка: {{ passport.encoding }}, страниц: {{ passport.pages }}) |
+| SHA-256 | `{{ passport.sha256 }}` |
+| Дата и время прогона | {{ passport.run_date }} |
+| Идентификатор прогона | `{{ passport.run_id }}` |
+| Режим | {{ passport.mode }} |
+| Модель | {{ passport.model | cell }} |
+| Версия агента | req-validator {{ passport.agent_version }}, коммит `{{ passport.git_commit }}`, тег {{ passport.git_tag }} |
+| Длительность | {{ passport.duration }} |
+| Статус чтения документа | `{{ passport.ingestion_status }}` |
+| Стандарты | ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3 |
+
+{% if passport.warnings or passport.notes %}
+**Диагностика:**
+{% for w in passport.warnings %}
+- {{ w }}
+{% endfor %}
+{% for n in passport.notes %}
+- {{ n }}
+{% endfor %}
+{% endif %}
+
+## 1. Нарезка требований
+
+Агент выделил **{{ metrics.total_requirements }}** атомарных требований; явный идентификатор в документе есть у **{{ metrics.requirements_with_explicit_id }}**. Остальным присвоены идентификаторы агента `REQ-xxx`, цитата сохранена дословно (позиция — смещение в символах в тексте документа).
+
+| ID в отчёте | ID в документе | Раздел | Тип | Краткая формулировка (цитата) |
+| :--- | :--- | :--- | :--- | :--- |
+{% for r in requirements %}
+| {{ r.req_id }} | {{ r.source_id | cell }} | {{ r.section | cell }} | {{ r.kind }}, {{ r.unit }} | {{ r.short | cell }} |
+{% endfor %}
+{% if not requirements %}
+| — | — | — | — | Требования не выделены |
+{% endif %}
+
+## 2. Проверка каждого требования
+
+Критерии ISO/IEC/IEEE 29148:2018 п. 5.2.5. Легенда: ✅ соответствует · ⚠️ требует проверки (подсказка, не учитывается в метриках) · ❌ нарушение · ◻️ не проверялось (семантика, LLM) · — неприменимо.
+
+| Требование | {% for c in criteria %}{{ c.short }} | {% endfor %}Дефекты |
+| :--- | {% for c in criteria %}:---: | {% endfor %}:---: |
+{% for row in matrix %}
+| {{ row.req_id }}{% if row.source_id != "—" %} ({{ row.source_id | cell }}){% endif %} | {% for i in row.icons %}{{ i }} | {% endfor %}{{ row.n_defects }} |
+{% endfor %}
+
+<details><summary>Расшифровка критериев</summary>
+
+| Код | Критерий | Ссылка | Что проверяют правила |
+| :--- | :--- | :--- | :--- |
+{% for c in criteria %}
+| {{ c.short }} | {{ c.name }} | {{ c.reference }} | {{ c.coverage | cell }} |
+{% endfor %}
+
+</details>
+
+### 2.1. Замечания по требованиям
+
+{% for d in details %}
+#### {{ d.req_id }}{% if d.source_id != "—" %} · {{ d.source_id }}{% endif %} — {{ d.section }}
+
+{{ d.quote | mdquote }}
+
+{% for x in d.defects %}
+- **[{{ x.severity }}]** `{{ x.id }}` · {{ x.criterion }} (`{{ x.rule_id }}`) · приоритет {{ x.priority }}
+  - **Цитата:** «{{ x.quote | cell }}» {% if x.verified %}(проверена, позиция {{ x.position }}){% endif %}
+
+  - **Проблема:** {{ x.explanation }}
+  - **Риск:** {{ x.risk }}
+  - **Как исправить:** {{ x.suggestion }}
+{% endfor %}
+{% for h in d.hints %}
+- ⚠️ *Подсказка* (`{{ h.rule_id }}`): {{ h.message }} — «{{ h.quote | cell }}»
+{% endfor %}
+
+{% endfor %}
+{% if not details %}
+Замечаний по отдельным требованиям нет.
+{% endif %}
+
+## 3. Проверка набора требований целиком
+
+Критерии ISO/IEC/IEEE 29148:2018 п. 5.2.6 и IEEE Std 830-1998 п. 4.3.
+
+| Критерий | Ссылка | Статус | Комментарий |
+| :--- | :--- | :---: | :--- |
+{% for c in set_checks %}
+| {{ c.criterion }} (`{{ c.rule_id }}`) | {{ c.reference | cell }} | {{ c.icon }} {{ c.status }} | {{ c.comment | cell }}{% if c.defect_ids %} — {{ c.defect_ids | join(", ") }}{% endif %} |
+{% endfor %}
+
+{% for x in set_defects %}
+- **[{{ x.severity }}]** `{{ x.id }}` · {{ x.criterion }} (`{{ x.rule_id }}`) · {{ x.section | cell }}
+  - **Цитата:** «{{ x.quote | cell }}»
+  - **Проблема:** {{ x.explanation }}
+  - **Как исправить:** {{ x.suggestion }}
+{% endfor %}
+
+## 4. Сводка
+
+| Показатель | Значение |
+| :--- | ---: |
+| Требований выделено | {{ metrics.total_requirements }} |
+| С явным ID в документе | {{ metrics.requirements_with_explicit_id }} |
+| Требований с нарушениями | {{ metrics.requirements_with_defects }} |
+| Нарушений всего | {{ metrics.total_defects }} |
+| FATAL / MAJOR / MINOR | {{ metrics.fatal_count }} / {{ metrics.major_count }} / {{ metrics.minor_count }} |
+| Подсказок (не входят в метрики) | {{ metrics.hints_count }} |
+| Плотность дефектов (DD) | {{ metrics.defect_density }} |
+| Индекс готовности (S_DoR) | {{ metrics.readiness_score }} / 100 |
+| Оценка сэкономленных трудозатрат | {{ metrics.estimated_saved_hours }} ч |
+
+### Критичные дефекты (FATAL и MAJOR)
+
+{% if critical %}
+| ID | Уровень | Тип формулировки | Требование | Цитата | Суть |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+{% for x in critical %}
+| {{ x.id }} | **[{{ x.severity }}]** | {{ x.type }} | {{ x.req_id }} | «{{ x.quote | cell }}» | {{ x.explanation | cell }} |
+{% endfor %}
+{% else %}
+Критичных дефектов не найдено.
+{% endif %}
+
+## 5. Итог
+
+**{{ verdict.icon }} {{ verdict.text }}**
+
+{{ verdict.rationale }}
+
+| Вопрос | Ответ | Пояснение |
+| :--- | :---: | :--- |
+| Можно начинать разработку? | **{{ verdict.dev }}** | {{ verdict.dev_note | cell }} |
+| Можно начинать тестирование? | **{{ verdict.test }}** | {{ verdict.test_note | cell }} |
+
+### Что исправить в первую очередь
+
+{% for r in remediation %}
+{{ loop.index }}. **{{ r.priority }}** — {{ r.action_item }} Дефекты: {{ r.target_defect_ids | join(", ") }}. *{{ r.business_impact }}*
+{% endfor %}
+{% if not remediation %}
+Исправлений не требуется.
+{% endif %}
+
+---
+*Отчёт сформирован автоматически агентом req-validator {{ passport.agent_version }} ({{ passport.git_commit }}). Каждое замечание привязано к цитате документа, цитаты проверены программно (RapidFuzz), метрики рассчитаны детерминированно по формулам Definition of Ready.*
