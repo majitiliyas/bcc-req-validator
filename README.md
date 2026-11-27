@@ -98,6 +98,8 @@ uv run req-validator web --open
 
 Презентация для финала лежит в `presentation/`: `DAIEK_WoopiePie_BCC_Hackathon.pptx` / `.pdf` и `speaker_notes.md`.
 
+Видео-демо (2 мин, 1080p, озвучка и субтитры): [`presentation/video/DAIEK_WoopiePie_Demo.mp4`](presentation/video/DAIEK_WoopiePie_Demo.mp4), субтитры — `presentation/video/subtitles.srt`.
+
 ## Архитектура
 
 ```mermaid
