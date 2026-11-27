@@ -237,6 +237,14 @@ def _dec(value: float | int) -> Decimal:
     return Decimal(str(value))
 
 
+def _fmt(value: Decimal) -> str:
+    """Decimal без лишних нулей и с пробелами-разделителями: 10000.0 → «10 000», 6.0 → «6», 0.5 → «0.5»."""
+    v = value.normalize()
+    if v == v.to_integral_value():
+        return f"{int(v):,}".replace(",", " ")
+    return format(v, "f")
+
+
 def compute_roi(metrics: SummaryMetrics, settings: object, *, llm_tokens: tuple[int, int] | None = None) -> RoiEstimate:
     """Прозрачная оценка ROI на Decimal (без LLM).
 
@@ -245,6 +253,7 @@ def compute_roi(metrics: SummaryMetrics, settings: object, *, llm_tokens: tuple[
     настраиваемые допущения (ROI_* в .env). Учитываются все дефекты отчёта (прошедшие проверку цитат).
     """
     g = lambda name: _dec(getattr(settings, name))  # noqa: E731
+    f = lambda name: _fmt(g(name))  # noqa: E731
     hour = Decimal("0.1")
     review = (_dec(metrics.total_requirements) * g("roi_review_minutes_per_req") / Decimal(60)).quantize(hour)
     fatal = (_dec(metrics.fatal_count) * g("roi_rework_hours_fatal")).quantize(hour)
@@ -256,26 +265,27 @@ def compute_roi(metrics: SummaryMetrics, settings: object, *, llm_tokens: tuple[
     cur = getattr(settings, "roi_currency", "₸")
     lines = [
         RoiLine(item="Автоматизированное ревью вместо ручного",
-                formula=f"{metrics.total_requirements} треб. × {g('roi_review_minutes_per_req')} мин / 60",
+                formula=f"{metrics.total_requirements} треб. × {f('roi_review_minutes_per_req')} мин / 60",
                 hours=float(review)),
         RoiLine(item="Предотвращённый rework: FATAL",
-                formula=f"{metrics.fatal_count} × {g('roi_rework_hours_fatal')} ч", hours=float(fatal)),
+                formula=f"{metrics.fatal_count} × {f('roi_rework_hours_fatal')} ч", hours=float(fatal)),
         RoiLine(item="Предотвращённый rework: MAJOR",
-                formula=f"{metrics.major_count} × {g('roi_rework_hours_major')} ч", hours=float(major)),
+                formula=f"{metrics.major_count} × {f('roi_rework_hours_major')} ч", hours=float(major)),
         RoiLine(item="Предотвращённый rework: MINOR",
-                formula=f"{metrics.minor_count} × {g('roi_rework_hours_minor')} ч", hours=float(minor)),
+                formula=f"{metrics.minor_count} × {f('roi_rework_hours_minor')} ч", hours=float(minor)),
     ]
     llm_cost = "0 (бесплатные тарифы API и локальная модель)"
     if llm_tokens is not None:
-        llm_cost += f"; токенов: {llm_tokens[0]} на вход / {llm_tokens[1]} на выход"
+        llm_cost += (f"; токенов в этом прогоне: {llm_tokens[0]} на вход / {llm_tokens[1]} на выход "
+                     "(шаги из кэша не тратят квоту)")
     return RoiEstimate(
         lines=lines, total_hours=float(total), hourly_rate=float(rate), currency=cur, total_money=float(money),
         assumptions=[
-            f"Ручное ревью одного требования — {g('roi_review_minutes_per_req')} мин (ROI_REVIEW_MINUTES_PER_REQ).",
-            f"Rework при позднем обнаружении: FATAL {g('roi_rework_hours_fatal')} ч, MAJOR {g('roi_rework_hours_major')} ч, "
-            f"MINOR {g('roi_rework_hours_minor')} ч — по §7.2 справочника (IBM SSI / NIST: исправление на тестировании "
+            f"Ручное ревью одного требования — {f('roi_review_minutes_per_req')} мин (ROI_REVIEW_MINUTES_PER_REQ).",
+            f"Rework при позднем обнаружении: FATAL {f('roi_rework_hours_fatal')} ч, MAJOR {f('roi_rework_hours_major')} ч, "
+            f"MINOR {f('roi_rework_hours_minor')} ч — по §7.2 справочника (IBM SSI / NIST: исправление на тестировании "
             "в 5–15 раз дороже, чем в требованиях).",
-            f"Стоимость часа команды — {rate} {cur} (ROI_HOURLY_RATE, допущение).",
+            f"Стоимость часа команды — {_fmt(rate)} {cur} (ROI_HOURLY_RATE, допущение).",
             "Учитываются все дефекты отчёта: каждый подтверждён цитатой, FATAL/MAJOR от LLM — ещё и Критиком.",
             "Оценка верхняя: часть дефектов могла бы быть найдена и при ручном ревью.",
         ],

@@ -56,7 +56,7 @@
 | Этап | Кол-во | | Пояснение |
 | :--- | ---: | :--- | :--- |
 {% for f in llm.funnel %}
-| {{ f.stage }} | {{ f.count }} | `{{ f.bar }}` | {{ f.note | cell }} |
+| {{ f.stage }} | {{ f.count }} | {% if f.bar %}`{{ f.bar }}`{% else %}—{% endif %} | {{ f.note | cell }} |
 {% endfor %}
 
 | Проход | Статус | Модели | Вызовов / кэш | Детали |

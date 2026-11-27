@@ -133,7 +133,9 @@ def test_roi_is_exact_decimal_arithmetic() -> None:
     hours = {ln.item.split(": ")[-1] if ":" in ln.item else "review": ln.hours for ln in roi.lines}
     assert hours == {"review": 6.7, "FATAL": 16.0, "MAJOR": 84.0, "MINOR": 25.0}
     assert roi.total_hours == 131.7 and roi.total_money == 1_317_000.0 and roi.currency == "₸"
-    assert any("16.0 ч" in a for a in roi.assumptions) and "1000" in roi.llm_cost
+    assert any("FATAL 16 ч" in a for a in roi.assumptions) and "1000 на вход" in roi.llm_cost
+    assert any("10 000 ₸" in a for a in roi.assumptions)
+    assert [ln.formula for ln in roi.lines][:2] == ["67 треб. × 6 мин / 60", "1 × 16 ч"]
 
 
 def test_roi_custom_coefficients() -> None:
