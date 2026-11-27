@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 from decimal import ROUND_HALF_UP, Decimal
 
-from .models import RoiEstimate, RoiLine
+from .models import RoiEstimate, RoiLine, RoiScenario
 from .models import (
     CheckStatus,
     CriterionCheck,
@@ -47,7 +47,7 @@ def compute_metrics(requirements: list[Requirement], defects: list[Defect], hint
         requirements_with_defects=len({d.req_id for d in defects if d.req_id}),
         fatal_count=f, major_count=ma, minor_count=mi, total_defects=len(defects), hints_count=hints_count,
         defect_density=_r(dd), readiness_score=_r(score, 1),
-        estimated_saved_hours=float(f * 16 + ma * 6 + mi * 1),
+        estimated_saved_hours=0.0,  # заполняется из RoiEstimate (единый источник), см. analyzer
     )
 
 
@@ -199,36 +199,49 @@ _SET_ACTIONS = {
     "ISO-526-05/NO_VERSION": "Зафиксировать версию, дату и историю изменений документа.",
     "ISO-526-07/NO_PRIORITY": "Добавить приоритизацию требований (MoSCoW / MVP).",
     "ISO-526-01/EMPTY_TABLE": "Заполнить пустые таблицы (согласующие) или удалить их.",
+    "ISO-526-01/UNFILLED_CHECKLIST": "Провести ревью требований и заполнить чек-лист: выбрать значение в каждой строке.",
     "ISO-526-01/EMPTY_CELL": "Убрать прочерки в таблицах или добавить легенду значений.",
     "ISO-525-03/BOUNDARY": "Уточнить включительность всех числовых границ.",
 }
 
 
+def shorten(text: str, limit: int = 240) -> str:
+    """Укоротить по границе слова (без обрезки слов посередине)."""
+    text = " ".join(text.split())
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    cut = cut[: cut.rfind(" ")] if " " in cut else cut
+    return cut.rstrip(" ,.;:—-") + "…"
+
+
 def build_remediation(defects: list[Defect]) -> list[RemediationItem]:
-    """P0: каждый FATAL — отдельный пункт; P1/P2: группы по правилу, самые массовые первыми."""
+    """P0 — каждый FATAL отдельным пунктом; далее группы (правило, уровень): P1 и P2 никогда не смешиваются.
+    Рекомендации — отдельным списком, укорочены по границе слова."""
     items: list[RemediationItem] = []
     for d in defects:
         if d.severity == Severity.FATAL:
             where = d.req_id or "весь документ"
-            items.append(RemediationItem(priority="P0", action_item=f"[{d.rule_id}] {where}: {d.suggestion}",
-                                         target_defect_ids=[d.defect_id], business_impact=_IMPACT[Severity.FATAL]))
-    groups: dict[str, list[Defect]] = defaultdict(list)
+            items.append(RemediationItem(priority="P0", action_item=f"[{d.rule_id}] {where}: {d.criterion}",
+                                         actions=[shorten(d.suggestion, 400)], target_defect_ids=[d.defect_id],
+                                         business_impact=_IMPACT[Severity.FATAL]))
+    groups: dict[tuple[str, Severity], list[Defect]] = defaultdict(list)
     for d in defects:
         if d.severity != Severity.FATAL:
-            groups[d.rule_id].append(d)
-    ordered = sorted(groups.items(), key=lambda kv: (min(d.severity.rank for d in kv[1]), -len(kv[1]), kv[0]))
-    for rule_id, ds in ordered:
-        sev = min((d.severity for d in ds), key=lambda s: s.rank)
+            groups[(d.rule_id, d.severity)].append(d)
+    ordered = sorted(groups.items(), key=lambda kv: (kv[0][1].rank, -len(kv[1]), kv[0][0]))
+    for (rule_id, sev), ds in ordered:
         pattern = PATTERNS_BY_CODE.get(rule_id)
-        action = _SET_ACTIONS.get(rule_id) or (pattern.suggestion if pattern else "")
-        if not action:  # LLM-находки: конкретные рекомендации из самих дефектов
-            uniq = list(dict.fromkeys(d.suggestion.strip() for d in ds if d.suggestion.strip()))
-            action = f"Критерий «{ds[0].criterion}»: " + " | ".join(u[:160] for u in uniq[:3])
-            if len(uniq) > 3:
-                action += f" | … и ещё {len(uniq) - 3}"
+        template = _SET_ACTIONS.get(rule_id) or (pattern.suggestion if pattern else "")
         reqs = sorted({d.req_id for d in ds if d.req_id})
-        where = f" Затронуто требований: {len(reqs)} ({', '.join(reqs[:8])}{'…' if len(reqs) > 8 else ''})." if reqs else ""
-        items.append(RemediationItem(priority=sev.priority, action_item=f"[{rule_id}] {action}{where}",
+        where = f" — требования: {', '.join(reqs[:8])}{'…' if len(reqs) > 8 else ''}" if reqs else ""
+        if template:
+            title, actions = f"[{rule_id}] {template}{where}", []
+        else:
+            title = f"[{rule_id}] Критерий «{ds[0].criterion}»{where}"
+            uniq = list(dict.fromkeys(shorten(d.suggestion) for d in ds if d.suggestion.strip()))
+            actions = uniq[:5] + ([f"… и ещё {len(uniq) - 5} рекомендаций в разделе 2.1"] if len(uniq) > 5 else [])
+        items.append(RemediationItem(priority=sev.priority, action_item=title, actions=actions,
                                      target_defect_ids=[d.defect_id for d in ds], business_impact=_IMPACT[sev]))
     return items
 
@@ -246,48 +259,66 @@ def _fmt(value: Decimal) -> str:
 
 
 def compute_roi(metrics: SummaryMetrics, settings: object, *, llm_tokens: tuple[int, int] | None = None) -> RoiEstimate:
-    """Прозрачная оценка ROI на Decimal (без LLM).
+    """Прозрачная оценка ROI на Decimal (без LLM), два сценария — консервативный и базовый.
 
-    Часы = N_req × минуты_ревью / 60 + Σ дефекты × часы_rework(уровень); деньги = часы × ставка.
-    Коэффициенты rework 16/6/1 ч — docs/iso_29148_ieee_830.md §7.2 (IBM SSI / NIST); ставка и минуты ревью —
-    настраиваемые допущения (ROI_* в .env). Учитываются все дефекты отчёта (прошедшие проверку цитат).
+    часы = ревью (N × мин/60)
+         + предотвращённый rework (16·FATAL + 6·MAJOR + h_minor·MINOR) × доля дефектов, пропускаемых ручным ревью
+         − разбор отчёта аналитиком (дефекты × мин/60)
+    деньги = часы × ставка; поток = часы × ТЗ в месяц (документы сопоставимого объёма).
     """
     g = lambda name: _dec(getattr(settings, name))  # noqa: E731
     f = lambda name: _fmt(g(name))  # noqa: E731
     hour = Decimal("0.1")
-    review = (_dec(metrics.total_requirements) * g("roi_review_minutes_per_req") / Decimal(60)).quantize(hour)
-    fatal = (_dec(metrics.fatal_count) * g("roi_rework_hours_fatal")).quantize(hour)
-    major = (_dec(metrics.major_count) * g("roi_rework_hours_major")).quantize(hour)
-    minor = (_dec(metrics.minor_count) * g("roi_rework_hours_minor")).quantize(hour)
-    total = review + fatal + major + minor
     rate = g("roi_hourly_rate")
-    money = (total * rate).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+    docs = _dec(getattr(settings, "roi_docs_per_month"))
     cur = getattr(settings, "roi_currency", "₸")
-    lines = [
-        RoiLine(item="Автоматизированное ревью вместо ручного",
-                formula=f"{metrics.total_requirements} треб. × {f('roi_review_minutes_per_req')} мин / 60",
-                hours=float(review)),
-        RoiLine(item="Предотвращённый rework: FATAL",
-                formula=f"{metrics.fatal_count} × {f('roi_rework_hours_fatal')} ч", hours=float(fatal)),
-        RoiLine(item="Предотвращённый rework: MAJOR",
-                formula=f"{metrics.major_count} × {f('roi_rework_hours_major')} ч", hours=float(major)),
-        RoiLine(item="Предотвращённый rework: MINOR",
-                formula=f"{metrics.minor_count} × {f('roi_rework_hours_minor')} ч", hours=float(minor)),
-    ]
+    n, fa, ma, mi = (_dec(metrics.total_requirements), _dec(metrics.fatal_count), _dec(metrics.major_count),
+                     _dec(metrics.minor_count))
+    defects = _dec(metrics.total_defects)
+    scenarios: list[RoiScenario] = []
+    for key, name in (("conservative", "Консервативный"), ("base", "Базовый")):
+        minutes = g(f"roi_review_minutes_per_req_{key}")
+        miss = g(f"roi_manual_miss_rate_{key}")
+        h_minor = g(f"roi_rework_hours_minor_{key}")
+        review = (n * minutes / Decimal(60)).quantize(hour)
+        rework_raw = fa * g("roi_rework_hours_fatal") + ma * g("roi_rework_hours_major") + mi * h_minor
+        avoided = (rework_raw * miss).quantize(hour)
+        triage = (defects * g("roi_triage_minutes_per_defect") / Decimal(60)).quantize(hour)
+        total = max(Decimal(0), review + avoided - triage)
+        money = (total * rate).quantize(Decimal(1), rounding=ROUND_HALF_UP)
+        monthly = (total * docs).quantize(hour)
+        lines = [
+            RoiLine(item="Первичное ревью требований агентом вместо ручного",
+                    formula=f"{metrics.total_requirements} треб. × {_fmt(minutes)} мин / 60", hours=float(review)),
+            RoiLine(item="Предотвращённый rework (дефекты, которые ручное ревью пропустило бы)",
+                    formula=(f"({metrics.fatal_count}×{f('roi_rework_hours_fatal')} + {metrics.major_count}×"
+                             f"{f('roi_rework_hours_major')} + {metrics.minor_count}×{_fmt(h_minor)}) ч × "
+                             f"{_fmt(miss * 100)} %"), hours=float(avoided)),
+            RoiLine(item="Минус разбор отчёта аналитиком",
+                    formula=f"−{metrics.total_defects} замеч. × {f('roi_triage_minutes_per_defect')} мин / 60",
+                    hours=-float(triage)),
+        ]
+        scenarios.append(RoiScenario(key=key, name=name, lines=lines, total_hours=float(total), money=float(money),
+                                     monthly_hours=float(monthly),
+                                     monthly_money=float((monthly * rate).quantize(Decimal(1), rounding=ROUND_HALF_UP))))
     llm_cost = "0 (бесплатные тарифы API и локальная модель)"
     if llm_tokens is not None:
         llm_cost += (f"; токенов в этом прогоне: {llm_tokens[0]} на вход / {llm_tokens[1]} на выход "
                      "(шаги из кэша не тратят квоту)")
     return RoiEstimate(
-        lines=lines, total_hours=float(total), hourly_rate=float(rate), currency=cur, total_money=float(money),
+        scenarios=scenarios, hourly_rate=float(rate), currency=cur, docs_per_month=int(docs), llm_cost=llm_cost,
         assumptions=[
-            f"Ручное ревью одного требования — {f('roi_review_minutes_per_req')} мин (ROI_REVIEW_MINUTES_PER_REQ).",
+            f"Ручное первичное ревью — {f('roi_review_minutes_per_req_conservative')}–{f('roi_review_minutes_per_req_base')} "
+            "мин на требование (ROI_REVIEW_MINUTES_PER_REQ_*).",
+            f"Ручное ревью пропустило бы {_fmt(g('roi_manual_miss_rate_conservative') * 100)}–"
+            f"{_fmt(g('roi_manual_miss_rate_base') * 100)} % найденных дефектов (ROI_MANUAL_MISS_RATE_*); "
+            "экономия засчитывается только за эту долю.",
             f"Rework при позднем обнаружении: FATAL {f('roi_rework_hours_fatal')} ч, MAJOR {f('roi_rework_hours_major')} ч, "
-            f"MINOR {f('roi_rework_hours_minor')} ч — по §7.2 справочника (IBM SSI / NIST: исправление на тестировании "
-            "в 5–15 раз дороже, чем в требованиях).",
-            f"Стоимость часа команды — {_fmt(rate)} {cur} (ROI_HOURLY_RATE, допущение).",
-            "Учитываются все дефекты отчёта: каждый подтверждён цитатой, FATAL/MAJOR от LLM — ещё и Критиком.",
-            "Оценка верхняя: часть дефектов могла бы быть найдена и при ручном ревью.",
+            f"MINOR {f('roi_rework_hours_minor_conservative')}–{f('roi_rework_hours_minor_base')} ч. Порядок величин — "
+            "NIST Planning Report 02-3 (2002) и IBM Systems Sciences Institute: исправление дефекта требований на этапе "
+            "тестирования обходится в 5–15 раз дороже, чем на этапе ревью.",
+            f"Разбор одного замечания аналитиком — {f('roi_triage_minutes_per_defect')} мин; вычитается из экономии.",
+            f"Стоимость часа команды — {f('roi_hourly_rate')} {cur} (ROI_HOURLY_RATE).",
+            f"Поток — {int(docs)} ТЗ сопоставимого объёма в месяц (ROI_DOCS_PER_MONTH); экстраполяция линейная.",
         ],
-        llm_cost=llm_cost,
     )

@@ -45,13 +45,13 @@
 #table(columns: (4.2cm, 1fr),
   [Параметр], [Значение],
   [Документ], [#p.document_title],
-  [Файл], [#p.file_name (#p.file_size байт, формат: #p.format, кодировка: #p.encoding, страниц: #str(p.pages))],
+  [Файл], [#p.file_name (#p.file_size байт, формат: #p.format, кодировка: #p.encoding#if p.pages != "" [, страниц: #str(p.pages)])],
   [SHA-256], [#text(size: 7.5pt, p.sha256)],
   [Дата и время прогона], [#p.run_date],
   [Идентификатор прогона], [#p.run_id],
   [Режим], [#p.mode],
   [Модель], [#p.model],
-  [Версия агента], [req-validator #p.agent_version, коммит #p.git_commit, тег #p.git_tag],
+  [Версия агента], [req-validator #p.agent_version, коммит #p.git_commit#if p.git_tag != "" [, тег #p.git_tag]],
   [Длительность], [#p.duration],
   [Статус чтения], [#p.ingestion_status],
   [Стандарты], [ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3],
@@ -74,6 +74,8 @@
     [Вызовов / из кэша], [#str(d.llm.calls) / #str(d.llm.cache_hits); токены #d.llm.tokens; 429: #str(d.llm.rate_limited); перенаправлений: #str(d.llm.reroutes)],
     [Отклонено без цитаты], [#str(d.llm.unverified)],
     [Критик], [#d.llm.critic],
+    [Генератор → Критик], [#text(size: 8pt, d.llm.critic_pairs)],
+    [Полный контекст], [#d.llm.full_context],
     [Маскирование ПДн], [#d.llm.pii],
     [Бюджет / реестр], [#d.llm.budget · #d.llm.registry],
   )
@@ -102,13 +104,15 @@
 == 2. Проверка каждого требования
 Легенда: OK — соответствует · ? — требует проверки · X — нарушение · «·» — не проверялось (LLM) · — неприменимо.
 
-#table(columns: (2.6cm,) + (1fr,) * d.criteria.len() + (1.2cm,),
+«Деф.» — дефекты по критериям п. 5.2.5; «Набор» — дефекты уровня набора (п. 5.2.6), привязанные к требованию как к якорю.
+
+#table(columns: (2.6cm,) + (1fr,) * d.criteria.len() + (1cm, 1.1cm),
   align: (x, y) => if x == 0 { left } else { center },
-  [Требование], ..d.criteria.map(c => text(size: 7pt, c.short)), [Деф.],
+  [Требование], ..d.criteria.map(c => text(size: 7pt, c.short)), [Деф.], [Набор],
   ..d.matrix.map(row => (
     (row.req_id + if row.source_id != "—" { " (" + row.source_id + ")" } else { "" },)
     + row.short.map(s => text(fill: status-color(s), weight: "bold", s))
-    + (str(row.n_defects),)
+    + (str(row.n_defects), if row.n_set > 0 { str(row.n_set) } else { "—" })
   )).flatten(),
 )
 
@@ -116,11 +120,11 @@
 #for x in d.details [
   #block(breakable: true, above: 1em)[
     *#x.req_id* #if x.source_id != "—" [· #x.source_id] — #x.section
-    #block(fill: luma(248), stroke: (left: 2pt + luma(200)), inset: 6pt, width: 100%, text(size: 8.5pt, x.quote))
+    #block(fill: luma(248), stroke: (left: 2pt + luma(200)), inset: 6pt, width: 100%, text(size: 8.5pt, x.quote_view))
     #for f in x.defects [
       #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) · #f.priority · #text(fill: luma(100), f.source_label + "; " + f.review) \
-      _Цитата:_ «#f.quote» \
-      #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_quote» \ ]
+      _Цитата:_ «#f.quote_view» \
+      #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_view» \ ]
       #if f.binding_note != "" [#text(fill: luma(100))[_Привязка:_ #f.binding_note] \ ]
       _Проблема:_ #f.explanation \
       _Риск:_ #f.risk \
@@ -128,7 +132,7 @@
       #v(3pt)
     ]
     #for h in x.hints [
-      #text(fill: luma(100))[? Подсказка (#h.rule_id): #h.message — «#h.quote»] \
+      #text(fill: luma(100))[? Подсказка (#h.rule_id): #h.message — «#h.quote_view»] \
     ]
   ]
 ]
@@ -142,8 +146,8 @@
 )
 #for f in d.set_defects [
   #badge(f.severity) *#f.id* · #f.criterion (#f.rule_id) · #text(fill: luma(100), f.source_label + "; " + f.review) \
-  _Цитата:_ «#f.quote» \
-  #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_quote» \ ]
+  _Цитата:_ «#f.quote_view» \
+  #if f.related_quote != "" [_Противоречит (#f.related_req):_ «#f.related_view» \ ]
   #if f.binding_note != "" [#text(fill: luma(100))[_Привязка:_ #f.binding_note] \ ]
   _Проблема:_ #f.explanation \
   _Как исправить:_ #f.suggestion
@@ -160,28 +164,34 @@
   [Подсказок (вне метрик)], [#m.hints_count],
   [Плотность дефектов (DD)], [#str(m.defect_density)],
   [Индекс готовности (S_DoR)], [#str(m.readiness_score) / 100],
-  [Сэкономленные трудозатраты], [#str(m.estimated_saved_hours) ч],
+  [Сэкономленные трудозатраты (базовый сценарий ROI)], [#(if d.roi != none { d.roi.base_hours } else { str(m.estimated_saved_hours) }) ч],
 )
 
 #if d.roi != none [
   === Бизнес-ценность (ROI)
-  #text(size: 8.5pt, fill: luma(90))[Детерминированный расчёт на Decimal, без LLM. Коэффициенты — явные допущения (настраиваются в .env).]
-  #table(columns: (6cm, 1fr, 2.2cm), align: (left, left, right),
-    [Статья], [Расчёт], [Часы],
-    ..d.roi.lines.map(ln => (ln.item, ln.formula, ln.hours)).flatten(),
-    [*Итого сэкономлено*], [], [*#d.roi.total_hours ч*],
-    [*В деньгах*], [#d.roi.total_hours ч × #d.roi.rate #d.roi.currency/ч], [*#d.roi.money #d.roi.currency*],
-    [Стоимость LLM-прогона], [#d.roi.llm_cost], [—],
+  #text(size: 8.5pt, fill: luma(90))[Детерминированный расчёт на Decimal, без LLM. Два сценария, все коэффициенты — явные допущения из .env.]
+  #table(columns: (5.2cm, 2.3cm, 2.3cm, 1fr), align: (left, right, right, left),
+    [Статья], [#d.roi.names.at(0)], [#d.roi.names.at(1)], [Расчёт (базовый)],
+    ..d.roi.rows.map(r => (r.item, r.vals.at(0) + " ч", r.vals.at(1) + " ч", text(size: 7.5pt, r.formulas.at(1)))).flatten(),
+    [*Итого на этот документ*], [*#d.roi.totals.at(0) ч*], [*#d.roi.totals.at(1) ч*], [],
+    [*В деньгах* (× #d.roi.rate #d.roi.currency/ч)], [*#d.roi.money.at(0) #d.roi.currency*], [*#d.roi.money.at(1) #d.roi.currency*], [],
+    [Поток #str(d.roi.docs) ТЗ/мес], [#d.roi.monthly_hours.at(0) ч ≈ #d.roi.monthly_money.at(0) #d.roi.currency],
+    [#d.roi.monthly_hours.at(1) ч ≈ #d.roi.monthly_money.at(1) #d.roi.currency], [линейная экстраполяция],
+    [Стоимость LLM-прогона], table.cell(colspan: 3, align: left, text(size: 8pt, d.roi.llm_cost)),
   )
-  #for a in d.roi.assumptions [- #text(size: 8.5pt, a)
+  #for a in d.roi.assumptions [- #text(size: 8pt, a)
   ]
 ]
 
 === Критичные дефекты (FATAL и MAJOR)
 #if d.critical.len() == 0 [Критичных дефектов не найдено.] else [
-  #table(columns: (1.4cm, 1.5cm, 2.2cm, 1.8cm, 1fr, 1fr),
+  #set text(size: 8pt)
+  #table(columns: (1.6cm, 1.55cm, 2.4cm, 2.3cm, 1fr, 1.25fr),
     [ID], [Уровень], [Тип], [Требование], [Цитата], [Суть],
-    ..d.critical.map(f => (f.id, badge(f.severity), f.type, f.req_id, "«" + f.quote + "»", f.explanation)).flatten(),
+    ..d.critical.map(f => (f.id, badge(f.severity), f.type,
+      f.req_id + if f.related_req != "" { " ↔ " + f.related_req } else { "" },
+      "«" + f.quote_view + "»" + if f.related_view != "" { " ↔ «" + f.related_view + "»" } else { "" },
+      f.explanation)).flatten(),
   )
 ]
 
@@ -200,5 +210,8 @@
 === Что исправить в первую очередь
 #if d.remediation.len() == 0 [Исправлений не требуется.]
 #for (i, r) in d.remediation.enumerate() [
-  + *#r.priority* — #r.action_item Дефекты: #r.target_defect_ids.join(", "). #text(fill: luma(100), r.business_impact)
+  + *#r.priority* — #r.action_item
+    #for a in r.actions [- #a
+    ]
+    #text(size: 8pt, fill: luma(100))[Дефекты: #r.target_defect_ids.join(", "). #r.business_impact]
 ]

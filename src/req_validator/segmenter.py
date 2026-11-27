@@ -68,6 +68,26 @@ _EXPLICIT_ID = re.compile(
     r")\]?[.):]?(?=\s|$)"
 )
 _ID_COLUMN = re.compile(r"^(id|№|#|ид\.?|идентификатор|код требования|номер)$", re.IGNORECASE)
+# Административные метаданные (кто/где/чем делали) — контекст, а не нормативные требования.
+ADMIN_ROW_KEYS = re.compile(
+    r"^(author|автор\w*|developer|разработчик\w*|исполнител\w*|(gitlab|github|bitbucket)( project| проект)?|"
+    r"repo(sitory)?|репозитори\w*|framework|фреймворк|jira|задача в jira|ticket|тикет|аналитик\w*|analyst|"
+    r"business owner|product owner|владел\w*|ответственн\w*|подразделение|фио.*|подпись|контакт\w*|"
+    r"дата( документа| создания)?|версия( документа)?|статус документа)$",
+    re.IGNORECASE,
+)
+
+
+def is_admin_row(cells: list[str]) -> bool:
+    """Строка таблицы «ключ — значение», где ключ — административный (Author, Developer, Gitlab project…)."""
+    return bool(cells) and bool(ADMIN_ROW_KEYS.match(strip_markdown(cells[0]).strip().rstrip(":")))
+
+
+def is_example_payload(block: DocumentBlock) -> bool:
+    """Пример тела запроса/ответа (JSON) — иллюстрация к контракту, а не самостоятельное требование."""
+    lang = (block.code_lang or "").lower()
+    text = block.text.strip()
+    return lang in ("json", "jsonc", "json5") or (lang in ("", "text") and text[:1] in "{[" and text[-1:] in "}]")
 
 _ABBREVIATIONS = (
     "т.д.", "т.п.", "т.е.", "т.к.", "т.ч.", "т. д.", "т. п.", "т. е.", "др.", "пр.", "п.", "пп.", "ст.", "г.",
@@ -245,6 +265,13 @@ def segment(doc: IngestionResult) -> SegmentationResult:
         )
 
     warnings: list[str] = []
+    admin_rows = sum(1 for b in doc.blocks if b.block_type == BlockType.TABLE
+                     and not classify_section(b.heading_titles).informative_heading
+                     for row in b.table_rows if is_admin_row(row.cells))
+    examples = sum(1 for b in doc.blocks if b.block_type == BlockType.CODE and is_example_payload(b))
+    if admin_rows or examples:
+        warnings.append(f"Не выделены как требования (используются как контекст раздела): строк метаданных — "
+                        f"{admin_rows}, примеров JSON — {examples}.")
     if not requirements:
         warnings.append("Не выделено ни одного требования: в документе нет нормативных разделов или формулировок.")
     else:
@@ -275,6 +302,8 @@ def _units_from_block(block: DocumentBlock, raw: str) -> list[_Unit]:
         for row in block.table_rows:
             if not any(c.strip() for c in row.cells):
                 continue
+            if is_admin_row(row.cells):
+                continue  # метаданные остаются в контексте раздела (полный текст документа), но не требования
             pairs = [f"{h}: {c}" if h else c for h, c in zip(header, row.cells, strict=False) if c.strip()]
             plain = "; ".join(pairs) if pairs else " ".join(row.cells)
             sid = row.cells[id_col].strip() if id_col is not None and id_col < len(row.cells) else None
@@ -284,7 +313,7 @@ def _units_from_block(block: DocumentBlock, raw: str) -> list[_Unit]:
 
     if block.block_type == BlockType.CODE:
         plain = " ".join(block.text.split())
-        if not plain:
+        if not plain or is_example_payload(block):
             return []
         return [_Unit(block, block.start_char, block.end_char, plain, None, False, block.code_lang, BlockType.CODE)]
 

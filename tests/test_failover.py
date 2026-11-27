@@ -140,7 +140,10 @@ def test_pass2_prompt_has_generic_contract_checks(settings: Settings, doc_path: 
     fake = FakeLLM()
     audit(settings, doc_path, fake)
     text = _user(fake.steps("pass2")[0][2])
-    assert "семантика HTTP-метода" in text and "коды ответов против тела" in text
+    for marker in ("1. Функциональные требования ↔ критерии приёмки", "2. Функциональные требования между собой",
+                   "3. Целостность API-контракта", "4. Бизнес-цель ↔ технический механизм"):
+        assert marker in text
+    assert "<full_document_context>" in text  # маленький документ передаётся целиком
     assert "ОБЛАСТЬ ПРОВЕРКИ: весь документ целиком" in text
 
 

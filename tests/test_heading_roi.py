@@ -32,6 +32,8 @@ DOC = """# API уведомлений
 {"result":"ERROR","message":"Проверьте сумму"}
 ```
 
+* **API-02.** Ответ содержит поле result со значением OK или ERROR.
+
 ### Пустой раздел
 
 ### Ошибки
@@ -52,16 +54,15 @@ def parsed(tmp_path: Path) -> tuple[Any, Any, list[Any]]:
 
 def test_requirements_layout(parsed: Any) -> None:
     _, seg, _ = parsed
-    texts = [r.text[:20] for r in seg.requirements]
-    assert texts[0].startswith("**API-01.**") and texts[1].startswith('{"result":"OK"')
-    assert texts[2].startswith('{"result":"ERROR"')
+    assert [r.source_id for r in seg.requirements] == ["API-01", "API-02", "ERR-01"]  # JSON-примеры — контекст
+    assert any("примеров JSON — 2" in w for w in seg.warnings)
 
 
 def test_exact_heading_binds_to_first_requirement_of_section(parsed: Any) -> None:
     doc, seg, heads = parsed
     a = heading_anchor("200. Successful — Created", heads, seg.requirements, doc.raw_markdown)
     assert isinstance(a, HeadingAnchor)
-    assert a.req_id == seg.requirements[1].req_id  # первый блок под заголовком — пример OK
+    assert a.req_id == seg.requirements[1].req_id  # первое требование раздела — API-02
     assert doc.raw_markdown[a.start_char:a.end_char] == "200. Successful — Created"
     assert "через заголовок раздела «200. Successful — Created»" in a.note
 
@@ -130,18 +131,30 @@ def _m(n: int, f: int, ma: int, mi: int) -> SummaryMetrics:
 def test_roi_is_exact_decimal_arithmetic() -> None:
     s = Settings(_env_file=None)
     roi = compute_roi(_m(67, 1, 14, 25), s, llm_tokens=(1000, 200))
-    hours = {ln.item.split(": ")[-1] if ":" in ln.item else "review": ln.hours for ln in roi.lines}
-    assert hours == {"review": 6.7, "FATAL": 16.0, "MAJOR": 84.0, "MINOR": 25.0}
-    assert roi.total_hours == 131.7 and roi.total_money == 1_317_000.0 and roi.currency == "₸"
-    assert any("FATAL 16 ч" in a for a in roi.assumptions) and "1000 на вход" in roi.llm_cost
-    assert any("10 000 ₸" in a for a in roi.assumptions)
-    assert [ln.formula for ln in roi.lines][:2] == ["67 треб. × 6 мин / 60", "1 × 16 ч"]
+    cons, base = roi.scenarios
+    assert (cons.key, base.key) == ("conservative", "base")
+    # консервативный: 67×1.5/60=1.7; (16+84+0)×0.4=40.0; −40×3/60=2.0 → 39.7
+    assert [ln.hours for ln in cons.lines] == [1.7, 40.0, -2.0] and cons.total_hours == 39.7
+    # базовый: 67×2/60=2.2; (16+84+25×0.25)×0.5=53.1 (53.125→53.1); −2.0 → 53.3
+    assert [ln.hours for ln in base.lines] == [2.2, 53.1, -2.0] and base.total_hours == 53.3
+    assert base.money == 533_000.0 and base.monthly_hours == 1599.0 and roi.docs_per_month == 30
+    assert roi.base is base and "1000 на вход" in roi.llm_cost
+    text = " ".join(roi.assumptions)
+    assert "NIST Planning Report 02-3" in text and "IBM Systems Sciences Institute" in text and "справочник" not in text
+    assert "40–50 %" in text and "10 000 ₸" in text
+
+
+def test_roi_never_negative_and_minor_free_in_conservative() -> None:
+    s = Settings(_env_file=None)
+    roi = compute_roi(_m(2, 0, 0, 40), s)  # только MINOR: консервативно rework = 0, разбор отчёта съедает экономию
+    assert roi.scenarios[0].total_hours == 0.0 and roi.scenarios[0].money == 0.0
 
 
 def test_roi_custom_coefficients() -> None:
-    s = Settings(_env_file=None, roi_review_minutes_per_req=10, roi_hourly_rate=2.5, roi_rework_hours_major=3)
-    roi = compute_roi(_m(3, 0, 1, 0), s)
-    assert roi.total_hours == 3.5 and roi.total_money == 9.0  # (0.5 + 3) × 2.5 = 8.75 → 9 (HALF_UP)
+    s = Settings(_env_file=None, roi_review_minutes_per_req_base=10, roi_hourly_rate=2.5, roi_rework_hours_major=3,
+                 roi_manual_miss_rate_base=1, roi_triage_minutes_per_defect=0, roi_docs_per_month=2)
+    base = compute_roi(_m(3, 0, 1, 0), s).base
+    assert base.total_hours == 3.5 and base.money == 9.0 and base.monthly_hours == 7.0  # (0.5 + 3) × 2.5 = 8.75 → 9
 
 
 def test_roi_and_funnel_rendered(tmp_path: Path, fixtures: Path, settings: Settings) -> None:
@@ -152,7 +165,9 @@ def test_roi_and_funnel_rendered(tmp_path: Path, fixtures: Path, settings: Setti
     written, errors = write_reports(report, tmp_path / "out" / "r.md", "md,pdf,html")
     assert errors == []
     md = (tmp_path / "out" / "r.md").read_text(encoding="utf-8")
-    assert "### Бизнес-ценность (ROI)" in md and "**Итого сэкономлено**" in md and "ROI_HOURLY_RATE" in md
+    assert "### Бизнес-ценность (ROI)" in md and "**Итого на этот документ**" in md and "ROI_HOURLY_RATE" in md
+    hours = report.roi.base.total_hours
+    assert f"| Сэкономленные трудозатраты (базовый сценарий ROI) | {hours:.1f} ч |" in md  # одно число в сводке и ROI
     import pymupdf
 
     assert "Бизнес-ценность" in "".join(p.get_text() for p in pymupdf.open(tmp_path / "out" / "r.pdf"))

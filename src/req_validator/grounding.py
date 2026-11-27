@@ -461,3 +461,27 @@ def heading_anchor(quote: str, headings: Iterable[DocumentBlock], requirements: 
     s, e = (idx, idx + len(title)) if idx >= 0 else (h.start_char, h.end_char)
     note = f"Привязано через заголовок раздела «{title}» к {first.req_id} (первое требование раздела)"
     return HeadingAnchor(req_id=first.req_id, heading=title, start_char=s, end_char=e, quote=source_text[s:e], note=note)
+
+
+def context_anchor(start: int, end: int, blocks: Iterable[DocumentBlock], requirements: Iterable[Requirement],
+                   source_text: str) -> HeadingAnchor | str:
+    """Точная цитата из блока, не выделенного как требование (пример JSON, строка метаданных, заголовок),
+    привязывается к первому требованию того же раздела; если в разделе требований нет — к первому требованию
+    ближайшего родительского раздела. Только для точных/нормализованных совпадений (позиции известны)."""
+    reqs = list(requirements)
+    host = next((b for b in blocks if b.start_char <= start and end <= b.end_char), None)
+    if host is None:
+        return "цитата не принадлежит ни одному блоку документа"
+    titles = list(host.heading_titles)
+    while titles:
+        path = " > ".join(titles)
+        first = next((r for r in reqs if r.heading_path == path or r.heading_path.startswith(path + " > ")), None)
+        if first is not None:
+            kind = {"code": "пример/фрагмент кода", "table": "строка таблицы", "heading": "заголовок",
+                    "paragraph": "абзац", "list_item": "пункт списка"}.get(host.block_type.value, "блок")
+            note = (f"Привязано через контекст раздела «{titles[-1]}» ({kind}, не выделенный как требование) "
+                    f"к {first.req_id}")
+            return HeadingAnchor(req_id=first.req_id, heading=titles[-1], start_char=start, end_char=end,
+                                 quote=source_text[start:end], note=note)
+        titles.pop()
+    return "в разделе цитаты и его родителях нет выделенных требований"

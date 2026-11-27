@@ -11,13 +11,13 @@
 | Параметр | Значение |
 | :--- | :--- |
 | Документ | {{ passport.document_title | cell }} |
-| Файл | `{{ passport.file_name | cell }}` ({{ passport.file_size }} байт, формат: {{ passport.format }}, кодировка: {{ passport.encoding }}, страниц: {{ passport.pages }}) |
+| Файл | `{{ passport.file_name | cell }}` ({{ passport.file_size }} байт, формат: {{ passport.format }}, кодировка: {{ passport.encoding }}{% if passport.pages %}, страниц: {{ passport.pages }}{% endif %}) |
 | SHA-256 | `{{ passport.sha256 }}` |
 | Дата и время прогона | {{ passport.run_date }} |
 | Идентификатор прогона | `{{ passport.run_id }}` |
 | Режим | {{ passport.mode }} |
 | Модель | {{ passport.model | cell }} |
-| Версия агента | req-validator {{ passport.agent_version }}, коммит `{{ passport.git_commit }}`, тег {{ passport.git_tag }} |
+| Версия агента | req-validator {{ passport.agent_version }}, коммит `{{ passport.git_commit }}`{% if passport.git_tag %}, тег `{{ passport.git_tag }}`{% endif %} |
 | Длительность | {{ passport.duration }} |
 | Статус чтения документа | `{{ passport.ingestion_status }}` |
 | Стандарты | ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3 |
@@ -47,6 +47,8 @@
 | 429 / перенаправлений (TPM-гард) | {{ llm.rate_limited }} / {{ llm.reroutes }} |
 | Отклонено без подтверждённой цитаты | {{ llm.unverified }} |
 | Критик | {{ llm.critic | cell }} |
+| Генератор → Критик | {{ llm.critic_pairs | cell }} |
+| Полный контекст документа | {{ llm.full_context }} |
 | Маскирование ПДн перед отправкой | {{ llm.pii | cell }} |
 | Бюджет прогона | {{ llm.budget | cell }} |
 | Глобальный реестр (Pass 0) | {{ llm.registry | cell }} |
@@ -93,10 +95,12 @@
 
 Критерии ISO/IEC/IEEE 29148:2018 п. 5.2.5. Легенда: ✅ соответствует · ⚠️ требует проверки (подсказка, не учитывается в метриках) · ❌ нарушение · ◻️ не проверялось (семантика, LLM) · — неприменимо.
 
-| Требование | {% for c in criteria %}{{ c.short }} | {% endfor %}Дефекты |
-| :--- | {% for c in criteria %}:---: | {% endfor %}:---: |
+Колонка «Деф.» — дефекты по критериям п. 5.2.5 этого требования; «Набор» — дефекты уровня набора (п. 5.2.6: противоречия, пропуски), привязанные к требованию как к якорю — они не отражаются в 9 колонках критериев.
+
+| Требование | {% for c in criteria %}{{ c.short }} | {% endfor %}Деф. | Набор |
+| :--- | {% for c in criteria %}:---: | {% endfor %}:---: | :---: |
 {% for row in matrix %}
-| {{ row.req_id }}{% if row.source_id != "—" %} ({{ row.source_id | cell }}){% endif %} | {% for i in row.icons %}{{ i }} | {% endfor %}{{ row.n_defects }} |
+| {{ row.req_id }}{% if row.source_id != "—" %} ({{ row.source_id | cell }}){% endif %} | {% for i in row.icons %}{{ i }} | {% endfor %}{{ row.n_defects }} | {{ row.n_set if row.n_set else "—" }} |
 {% endfor %}
 
 <details><summary>Расшифровка критериев</summary>
@@ -178,21 +182,22 @@
 | Подсказок (не входят в метрики) | {{ metrics.hints_count }} |
 | Плотность дефектов (DD) | {{ metrics.defect_density }} |
 | Индекс готовности (S_DoR) | {{ metrics.readiness_score }} / 100 |
-| Оценка сэкономленных трудозатрат | {{ metrics.estimated_saved_hours }} ч |
+| Сэкономленные трудозатраты (базовый сценарий ROI) | {{ roi.base_hours if roi else metrics.estimated_saved_hours }} ч |
 
 {% if roi %}
 ### Бизнес-ценность (ROI)
 
-Детерминированный расчёт на `Decimal`, без LLM. Коэффициенты — явные допущения, настраиваются в `.env`.
+Детерминированный расчёт на `Decimal`, без LLM. Два сценария, все коэффициенты — явные допущения из `.env`.
 
-| Статья | Расчёт | Часы |
-| :--- | :--- | ---: |
-{% for ln in roi.lines %}
-| {{ ln.item }} | {{ ln.formula | cell }} | {{ ln.hours }} |
+| Статья | {{ roi.names[0] }} | {{ roi.names[1] }} | Расчёт (базовый) |
+| :--- | ---: | ---: | :--- |
+{% for r in roi.rows %}
+| {{ r.item }} | {{ r.vals[0] }} ч | {{ r.vals[1] }} ч | {{ r.formulas[1] | cell }} |
 {% endfor %}
-| **Итого сэкономлено** | | **{{ roi.total_hours }} ч** |
-| **В деньгах** | {{ roi.total_hours }} ч × {{ roi.rate }} {{ roi.currency }}/ч | **{{ roi.money }} {{ roi.currency }}** |
-| Стоимость LLM-прогона | {{ roi.llm_cost | cell }} | — |
+| **Итого на этот документ** | **{{ roi.totals[0] }} ч** | **{{ roi.totals[1] }} ч** | |
+| **В деньгах** (× {{ roi.rate }} {{ roi.currency }}/ч) | **{{ roi.money[0] }} {{ roi.currency }}** | **{{ roi.money[1] }} {{ roi.currency }}** | |
+| Поток {{ roi.docs }} ТЗ/мес | {{ roi.monthly_hours[0] }} ч ≈ {{ roi.monthly_money[0] }} {{ roi.currency }} | {{ roi.monthly_hours[1] }} ч ≈ {{ roi.monthly_money[1] }} {{ roi.currency }} | линейная экстраполяция |
+| Стоимость LLM-прогона | {{ roi.llm_cost | cell }} | | |
 
 Допущения:
 {% for a in roi.assumptions %}
@@ -228,7 +233,11 @@
 ### Что исправить в первую очередь
 
 {% for r in remediation %}
-{{ loop.index }}. **{{ r.priority }}** — {{ r.action_item }} Дефекты: {{ r.target_defect_ids | join(", ") }}. *{{ r.business_impact }}*
+{{ loop.index }}. **{{ r.priority }}** — {{ r.action_item }}
+{% for a in r.actions %}
+   - {{ a }}
+{% endfor %}
+   - Дефекты: {{ r.target_defect_ids | join(", ") }}. *{{ r.business_impact }}*
 {% endfor %}
 {% if not remediation %}
 Исправлений не требуется.

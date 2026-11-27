@@ -282,6 +282,8 @@ class LLMRunInfo(BaseModel):
     unverified_rejected: int = 0
     rejected_examples: list[str] = Field(default_factory=list)
     critic: dict[str, int] = Field(default_factory=dict)
+    critic_pairs: dict[str, int] = Field(default_factory=dict, description="«генератор → Критик» → число находок")
+    full_context: bool = Field(default=False, description="Полный текст документа передан в Pass 1/2 и Критику")
     pii_masked: dict[str, int] = Field(default_factory=dict)
     budget: dict[str, object] = Field(default_factory=dict)
     registry_size: dict[str, int] = Field(default_factory=dict)
@@ -330,6 +332,7 @@ class RemediationItem(BaseModel):
     action_item: str
     target_defect_ids: list[str]
     business_impact: str
+    actions: list[str] = Field(default_factory=list, description="Конкретные рекомендации списком")
 
 
 class Verdict(BaseModel):
@@ -350,16 +353,29 @@ class RoiLine(BaseModel):
     hours: float
 
 
-class RoiEstimate(BaseModel):
-    """Детерминированная оценка бизнес-ценности (Decimal → float только для вывода)."""
-
+class RoiScenario(BaseModel):
+    key: str = Field(description="conservative | base")
+    name: str
     lines: list[RoiLine]
     total_hours: float
+    money: float
+    monthly_hours: float
+    monthly_money: float
+
+
+class RoiEstimate(BaseModel):
+    """Детерминированная оценка бизнес-ценности: расчёт на Decimal, float — только для вывода."""
+
+    scenarios: list[RoiScenario]
     hourly_rate: float
     currency: str
-    total_money: float
+    docs_per_month: int
     assumptions: list[str]
     llm_cost: str
+
+    @property
+    def base(self) -> RoiScenario:
+        return next(s for s in self.scenarios if s.key == "base")
 
 
 class AuditReport(BaseModel):

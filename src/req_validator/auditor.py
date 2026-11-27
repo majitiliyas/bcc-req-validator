@@ -23,7 +23,7 @@ from pydantic import BaseModel, ValidationError
 
 from .cache import DiskStepCache, canonical_json, sha256_hex
 from .config import Settings
-from .grounding import HeadingAnchor, heading_anchor, normalize_with_map, verify_citation
+from .grounding import HeadingAnchor, context_anchor, heading_anchor, normalize_with_map, verify_citation
 from .guards import GuardError, TraceLogger, estimate_tokens
 from .llm_schemas import (
     CriticOutput,
@@ -57,6 +57,7 @@ from .prompts import (
     PASS2_HOLISTIC,
     QUOTE_REPAIR,
     PromptTemplate,
+    full_context_block,
     spotlight,
 )
 from .router import AllDeploymentsFailedError, ChatRequest, LLMRouter
@@ -86,6 +87,8 @@ class AuditContext:
     tracer: TraceLogger | None = None
     masker: PiiMasker = field(default_factory=PiiMasker)
     headings: list[DocumentBlock] = field(default_factory=list)  # заголовки разделов для привязки цитат
+    blocks: list[DocumentBlock] = field(default_factory=list)  # все блоки документа (контекст вне требований)
+    full_context: str = ""  # замаскированный полный текст документа, если он меньше порога
     llm_calls: int = 0
     cache_hits: int = 0
 
@@ -104,6 +107,7 @@ class LLMAuditOutcome:
     registry: GlobalRegistry
     critic_stats: dict[str, int]
     funnel: list[tuple[str, int, str]] = field(default_factory=list)  # (этап, количество, пояснение)
+    critic_pairs: dict[str, int] = field(default_factory=dict)  # «генератор → Критик» → число находок
 
 
 # --------------------------------------------------------------------------- #
@@ -358,8 +362,10 @@ async def pass1_items(ctx: AuditContext, reqs: list[Requirement], registry: Glob
                 out, model, _ = await structured_call(
                     ctx, step=step, group=ctx.settings.pass1_group, prompt=PASS1_AUDIT,
                     values={"criteria": criteria, "registry": ctx.masker.mask(reg), "known": known,
-                            "negative_examples": PASS1_NEGATIVE_EXAMPLES, "requirements": spotlight(doc)},
-                    schema=Pass1Output, canonical_input={"doc": doc, "reg": reg, "known": known})
+                            "negative_examples": PASS1_NEGATIVE_EXAMPLES, "requirements": spotlight(doc),
+                            "full_context": full_context_block(ctx.full_context)},
+                    schema=Pass1Output, canonical_input={"doc": doc, "reg": reg, "known": known,
+                                                         "ctx": sha256_hex(ctx.full_context)})
             except (StructuredCallError, *_LLM_ERRORS) as exc:
                 ctx.trace("pass_failed", name="pass1", batch=step, error=str(exc)[:300])
                 return [], set(), f"{step}: {str(exc)[:160]}"
@@ -410,8 +416,9 @@ async def _pass2_call(ctx: AuditContext, block: list[Requirement], registry: Glo
         ctx, step=step, group="deep", prompt=PASS2_HOLISTIC,
         values={"criteria": catalog_text(SET_CRITERIA), "checklist": FINTECH_CHECKLIST, "scope": scope,
                 "contract_checks": PASS2_CONTRACT_CHECKS, "registry": ctx.masker.mask(reg), "known": known,
-                "requirements": spotlight(doc)},
-        schema=Pass2Output, canonical_input={"doc": doc, "reg": reg, "known": known, "scope": scope})
+                "requirements": spotlight(doc), "full_context": full_context_block(ctx.full_context)},
+        schema=Pass2Output, canonical_input={"doc": doc, "reg": reg, "known": known, "scope": scope,
+                                             "ctx": sha256_hex(ctx.full_context)})
     out = Pass2Output.model_validate(ctx.masker.unmask_obj(out.model_dump()))
     return [_to_defect(f, rule_suffix=f.kind, model=model, pass_name="pass2", by_id=by_id) for f in out.findings], model
 
@@ -550,6 +557,14 @@ async def _verify_quote(ctx: AuditContext, quote: str, req_id: str | None, reqs:
         note = anchor.note + (f"; заявлено {req_id}" if req_id and req_id != anchor.req_id else "")
         ctx.trace("quote_heading_anchor", declared=req_id, owner=anchor.req_id, heading=anchor.heading[:60])
         return anchor.quote, anchor.start_char, anchor.end_char, anchor.req_id, note, "через заголовок раздела"
+    if check.verified and check.method in ("exact", "normalized") and ctx.blocks:
+        spans = check.spans or [(check.start_char or 0, check.end_char or 0)]
+        if len(spans) == 1:  # неоднозначные короткие цитаты не привязываем
+            ca = context_anchor(spans[0][0], spans[0][1], ctx.blocks, reqs, raw)
+            if isinstance(ca, HeadingAnchor):
+                note = ca.note + (f"; заявлено {req_id}" if req_id and req_id != ca.req_id else "")
+                ctx.trace("quote_context_anchor", declared=req_id, owner=ca.req_id, section=ca.heading[:60])
+                return ca.quote, ca.start_char, ca.end_char, ca.req_id, note, "через контекст раздела"
     if req is None:
         return reason  # ремонтировать не к чему: нет текста-хендла
     repairs[0] += 1
@@ -636,7 +651,7 @@ def merge_with_rules(rule_defects: list[Defect], llm_defects: list[Defect]) -> l
 # --------------------------------------------------------------------------- #
 
 
-async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Requirement]) -> tuple[list[Defect], dict[str, int], PassStatus]:
+async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Requirement]) -> tuple[list[Defect], dict[str, Any], PassStatus]:
     by_id = {r.req_id: r for r in reqs}
     stats = {"reviewed": 0, "confirmed": 0, "downgraded": 0, "rejected": 0, "not_reviewed": 0, "same_model": 0}
     calls0, hits0 = ctx.llm_calls, ctx.cache_hits
@@ -644,6 +659,7 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
                if d.source == FindingSource.LLM and d.severity in (Severity.FATAL, Severity.MAJOR)]
     decisions: dict[str, Any] = {}
     critic_models: dict[str, str] = {}
+    pairs: Counter[str] = Counter()
     errors: list[str] = []
     for batch_start in range(0, len(targets), ctx.settings.critic_batch_size):
         batch = targets[batch_start:batch_start + ctx.settings.critic_batch_size]
@@ -661,8 +677,9 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
         gen_models = {d.model for _, d in batch if d.model}
         try:
             out, model, _ = await structured_call(
-                ctx, step=f"critic:{sha256_hex(items_text)[:12]}", group="deep", prompt=CRITIC,
-                values={"items": items_text}, schema=CriticOutput, canonical_input={"items": items_text},
+                ctx, step=f"critic:{sha256_hex(items_text)[:12]}", group="critic", prompt=CRITIC,
+                values={"items": items_text, "full_context": full_context_block(ctx.full_context)},
+                schema=CriticOutput, canonical_input={"items": items_text, "ctx": sha256_hex(ctx.full_context)},
                 prefer_not=gen_models)
         except (StructuredCallError, *_LLM_ERRORS) as exc:
             errors.append(str(exc)[:160])
@@ -688,6 +705,7 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
         cmodel = critic_models[item_id]
         same = cmodel == d.model
         stats["same_model"] += int(same)
+        pairs[f"{d.model or '?'} → {cmodel}"] += 1
         note = f"Критик ({cmodel}{', та же модель' if same else ''}): {ctx.masker.unmask(dec.reason)}"
         if dec.decision == "REJECTED":
             stats["rejected"] += 1
@@ -708,7 +726,8 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
     detail = (f"на проверке {len(targets)} (FATAL/MAJOR): подтверждено {stats['confirmed']}, понижено "
               f"{stats['downgraded']}, отклонено {stats['rejected']}, без проверки {stats['not_reviewed']}")
     if stats["same_model"]:
-        detail += f"; та же модель, что у генератора: {stats['same_model']}"
+        detail += f"; та же модель, что у генератора: {stats['same_model']} из {stats['reviewed']}"
+    stats["_pairs"] = dict(pairs)  # type: ignore[assignment]
     return result, stats, PassStatus(name="Pass 3b — независимый Критик", status=status, detail=detail,
                                      llm_calls=ctx.llm_calls - calls0, cache_hits=ctx.cache_hits - hits0,
                                      items=len(targets))
@@ -721,9 +740,14 @@ async def critic_review(ctx: AuditContext, defects: list[Defect], reqs: list[Req
 
 async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[Requirement],
                         rule_defects: list[Defect], hints: list[Hint],
-                        headings: list[DocumentBlock] | None = None) -> LLMAuditOutcome:
+                        headings: list[DocumentBlock] | None = None,
+                        blocks: list[DocumentBlock] | None = None) -> LLMAuditOutcome:
     if headings is not None:
         ctx.headings = headings
+    if blocks is not None:
+        ctx.blocks = blocks
+    if len(raw.encode("utf-8")) <= ctx.settings.full_context_max_bytes:
+        ctx.full_context = ctx.masker.mask(raw)
     passes: list[PassStatus] = []
     registry, st0 = await pass0_registry(ctx, title, reqs, raw)
     passes.append(st0)
@@ -743,6 +767,7 @@ async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[R
 
     reviewed, critic_stats, st3 = await critic_review(ctx, merged, reqs)
     passes.append(st3)
+    critic_pairs = critic_stats.pop("_pairs", {})
     to_critic = critic_stats["reviewed"] + critic_stats["not_reviewed"]
     funnel = [
         ("Кандидаты LLM (Pass 1 + Pass 2)", len(p1) + len(p2), "находки моделей до любых проверок"),
@@ -756,4 +781,5 @@ async def run_llm_audit(ctx: AuditContext, *, title: str, raw: str, reqs: list[R
         ("MINOR без Критика", len(merged) - to_critic, "низкий риск — только проверка цитаты"),
     ]
     return LLMAuditOutcome(defects=reviewed, rejected=rejected, passes=passes, checked_req_ids=checked,
-                           set_checked=set_checked, registry=registry, critic_stats=critic_stats, funnel=funnel)
+                           set_checked=set_checked, registry=registry, critic_stats=critic_stats, funnel=funnel,
+                           critic_pairs=critic_pairs)

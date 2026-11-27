@@ -233,7 +233,11 @@ def _first_word(plain: str) -> str:
 
 
 def _check_conforming(req: Requirement) -> tuple[list[Defect], list[Hint]]:
+    """Нет модального глагола → ПОДСКАЗКА (вне метрик и ROI): стилистика EARS, а не дефект смысла.
+    Для целей/бизнес-процесса и непрозаических блоков не применяется."""
     if req.kind not in _PROSE_KINDS or req.unit_type not in (BlockType.PARAGRAPH, BlockType.LIST_ITEM):
+        return [], []
+    if any(re.search(r"\bцел[иь]\b|\bgoals?\b", t, re.I) for t in req.heading_path.split(" > ")):
         return [], []
     plain = req.plain_text
     if "→" in plain or word_count(plain) < 4 or MODAL_MARKERS.search(plain):
@@ -242,10 +246,8 @@ def _check_conforming(req: Requirement) -> tuple[list[Defect], list[Hint]]:
         return [], []  # императив-инфинитив («Хранить…», «Проверить…») — допустимая форма
     first = split_sentences(req.text)
     quote = req.text[first[0][0]:first[0][1]] if first else req.text
-    return [_draft("ISO-525-09/NO_MODAL", Severity.MINOR, DefectCategory.SINGLE_REQ_QUALITY, req, quote.strip(),
-                   "Требование сформулировано в настоящем времени без модального глагола — его легко принять за описание AS-IS.",
-                   "Переформулировать по EARS: «<Система> должна <действие> <объект> [при <условии>]».",
-                   "Риск разной трактовки обязательности требования.")], []
+    return [], [Hint(rule_id="ISO-525-09/NO_MODAL", req_id=req.req_id, exact_quote=quote.strip(),
+                     message="Нет модального глагола («должна») — по EARS: «<Система> должна <действие> [при <условии>]».")]
 
 
 def _structure_hints(req: Requirement) -> list[Hint]:
@@ -325,6 +327,7 @@ def check_set(doc: IngestionResult, reqs: list[Requirement]) -> SetFindings:
             "Риск неверного планирования релиза.", section=doc.title))
 
     defects += _empty_tables(doc)
+    defects += _unfilled_checklists(doc)
 
     used = [name for name, rx in _SYNONYMS.items() if re.search(rx, raw, re.IGNORECASE)]
     if len(used) >= 3:
@@ -345,6 +348,28 @@ def _empty_tables(doc: IngestionResult) -> list[Defect]:
                 f"Таблица в разделе «{b.heading_titles[-1] if b.heading_titles else '—'}» не заполнена.",
                 "Заполнить таблицу (ответственные, согласования) или удалить её из документа.",
                 "Риск передачи в разработку несогласованного документа.", section=b.heading_path))
+    return out
+
+
+_UNSELECTED = re.compile(r"^\s*да\s*/\s*нет(\s*/\s*не\s+требуется)?\s*$", re.IGNORECASE)
+
+
+def _unfilled_checklists(doc: IngestionResult) -> list[Defect]:
+    """Чек-лист, где в ячейках остались варианты «Да / Нет» без выбора, — признак незавершённого ревью документа."""
+    out: list[Defect] = []
+    for b in doc.blocks:
+        if b.block_type != BlockType.TABLE:
+            continue
+        rows = [r for r in b.table_rows if any(_UNSELECTED.match(c) for c in r.cells)]
+        if not rows:
+            continue
+        section = b.heading_titles[-1] if b.heading_titles else "—"
+        out.append(_draft(
+            "ISO-526-01/UNFILLED_CHECKLIST", Severity.MINOR, DefectCategory.SET_CONSISTENCY, None, rows[0].raw.strip(),
+            f"Чек-лист в разделе «{section}» не заполнен: в {len(rows)} из {len(b.table_rows)} строк остались варианты "
+            "«Да / Нет» без выбора — ревью требований не проведено или не зафиксировано.",
+            "Заполнить чек-лист (выбрать значение в каждой строке, указать примечания) до передачи в разработку.",
+            "Риск передачи в разработку документа без внутреннего ревью.", section=b.heading_path))
     return out
 
 

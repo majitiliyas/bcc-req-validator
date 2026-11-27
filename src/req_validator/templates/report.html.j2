@@ -39,11 +39,11 @@
 <h2>Паспорт прогона</h2>
 <table>
 <tr><th>Документ</th><td>{{ passport.document_title }}</td></tr>
-<tr><th>Файл</th><td><code>{{ passport.file_name }}</code> — {{ passport.file_size }} байт, формат {{ passport.format }}, кодировка {{ passport.encoding }}, страниц: {{ passport.pages }}</td></tr>
+<tr><th>Файл</th><td><code>{{ passport.file_name }}</code> — {{ passport.file_size }} байт, формат {{ passport.format }}, кодировка {{ passport.encoding }}{% if passport.pages %}, страниц: {{ passport.pages }}{% endif %}</td></tr>
 <tr><th>SHA-256</th><td><code>{{ passport.sha256 }}</code></td></tr>
 <tr><th>Дата и время прогона</th><td>{{ passport.run_date }} (прогон <code>{{ passport.run_id }}</code>, {{ passport.duration }})</td></tr>
 <tr><th>Режим / модель</th><td>{{ passport.mode }} / {{ passport.model }}</td></tr>
-<tr><th>Версия агента</th><td>req-validator {{ passport.agent_version }}, коммит <code>{{ passport.git_commit }}</code>, тег {{ passport.git_tag }}</td></tr>
+<tr><th>Версия агента</th><td>req-validator {{ passport.agent_version }}, коммит <code>{{ passport.git_commit }}</code>{% if passport.git_tag %}, тег <code>{{ passport.git_tag }}</code>{% endif %}</td></tr>
 <tr><th>Статус чтения</th><td><code>{{ passport.ingestion_status }}</code></td></tr>
 <tr><th>Стандарты</th><td>ISO/IEC/IEEE 29148:2018 п. 5.2.5, 5.2.6; IEEE Std 830-1998 п. 4.3</td></tr>
 {% if passport.warnings or passport.notes %}<tr><th>Диагностика</th><td><ul>{% for w in passport.warnings %}<li>{{ w }}</li>{% endfor %}{% for n in passport.notes %}<li>{{ n }}</li>{% endfor %}</ul></td></tr>{% endif %}
@@ -58,6 +58,8 @@
 <tr><th>Вызовов LLM / из кэша</th><td>{{ llm.calls }} / {{ llm.cache_hits }}; токены {{ llm.tokens }}; 429: {{ llm.rate_limited }}; перенаправлений: {{ llm.reroutes }}</td></tr>
 <tr><th>Отклонено без цитаты</th><td>{{ llm.unverified }}</td></tr>
 <tr><th>Критик</th><td>{{ llm.critic }}</td></tr>
+<tr><th>Генератор → Критик</th><td>{{ llm.critic_pairs }}</td></tr>
+<tr><th>Полный контекст документа</th><td>{{ llm.full_context }}</td></tr>
 <tr><th>Маскирование ПДн</th><td>{{ llm.pii }}</td></tr>
 <tr><th>Бюджет / реестр</th><td>{{ llm.budget }} · {{ llm.registry }}</td></tr>
 </table>
@@ -79,21 +81,21 @@
 
 <h2>2. Проверка каждого требования</h2>
 <p class="muted">✅ соответствует · ⚠️ требует проверки · ❌ нарушение · ◻️ не проверялось (LLM) · — неприменимо</p>
-<table><tr><th>Требование</th>{% for c in criteria %}<th title="{{ c.name }} — {{ c.reference }}">{{ c.short }}</th>{% endfor %}<th>Дефекты</th></tr>
-{% for row in matrix %}<tr><td>{{ row.req_id }}{% if row.source_id != "—" %} ({{ row.source_id }}){% endif %}</td>{% for i in row.icons %}<td class="c">{{ i }}</td>{% endfor %}<td class="c">{{ row.n_defects }}</td></tr>
+<table><tr><th>Требование</th>{% for c in criteria %}<th title="{{ c.name }} — {{ c.reference }}">{{ c.short }}</th>{% endfor %}<th>Деф.</th><th title="Дефекты уровня набора (п. 5.2.6), привязанные к требованию">Набор</th></tr>
+{% for row in matrix %}<tr><td>{{ row.req_id }}{% if row.source_id != "—" %} ({{ row.source_id }}){% endif %}</td>{% for i in row.icons %}<td class="c">{{ i }}</td>{% endfor %}<td class="c">{{ row.n_defects }}</td><td class="c">{{ row.n_set if row.n_set else "—" }}</td></tr>
 {% endfor %}</table>
 
 <h3>2.1. Замечания по требованиям</h3>
 {% for d in details %}
 <h4>{{ d.req_id }}{% if d.source_id != "—" %} · {{ d.source_id }}{% endif %} — {{ d.section }}</h4>
-<blockquote>{{ d.quote }}</blockquote>
+<blockquote>{{ d.quote_view }}</blockquote>
 {% for x in d.defects %}
 <div class="defect"><p><span class="badge {{ x.severity }}">{{ x.severity }}</span> <code>{{ x.id }}</code> {{ x.criterion }} (<code>{{ x.rule_id }}</code>), приоритет {{ x.priority }} <span class="muted">· {{ x.source_label }} · {{ x.review }}{% if x.original_severity %} (было {{ x.original_severity }}){% endif %}</span></p>
-<p><b>Цитата:</b> «{{ x.quote }}»{% if x.verified %} <span class="muted">(проверена, позиция {{ x.position }})</span>{% endif %}</p>
-{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_quote }}»</p>{% endif %}{% if x.binding_note %}<p class="muted"><b>Привязка:</b> {{ x.binding_note }}</p>{% endif %}
+<p><b>Цитата:</b> «{{ x.quote_view }}»{% if x.verified %} <span class="muted">(проверена, позиция {{ x.position }})</span>{% endif %}</p>
+{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_view }}»</p>{% endif %}{% if x.binding_note %}<p class="muted"><b>Привязка:</b> {{ x.binding_note }}</p>{% endif %}
 <p><b>Проблема:</b> {{ x.explanation }}</p><p><b>Риск:</b> {{ x.risk }}</p><p><b>Как исправить:</b> {{ x.suggestion }}</p>{% if x.review_note %}<p class="muted">{{ x.review_note }}</p>{% endif %}</div>
 {% endfor %}
-{% for h in d.hints %}<p class="hint">⚠️ Подсказка (<code>{{ h.rule_id }}</code>): {{ h.message }} — «{{ h.quote }}»</p>{% endfor %}
+{% for h in d.hints %}<p class="hint">⚠️ Подсказка (<code>{{ h.rule_id }}</code>): {{ h.message }} — «{{ h.quote_view }}»</p>{% endfor %}
 {% endfor %}
 
 <h2>3. Проверка набора требований целиком</h2>
@@ -102,7 +104,7 @@
 {% endfor %}</table>
 {% for x in set_defects %}
 <div class="defect"><p><span class="badge {{ x.severity }}">{{ x.severity }}</span> <code>{{ x.id }}</code> {{ x.criterion }} (<code>{{ x.rule_id }}</code>) <span class="muted">· {{ x.source_label }} · {{ x.review }}</span></p>
-<p><b>Цитата:</b> «{{ x.quote }}»</p>{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_quote }}»</p>{% endif %}{% if x.binding_note %}<p class="muted"><b>Привязка:</b> {{ x.binding_note }}</p>{% endif %}<p><b>Проблема:</b> {{ x.explanation }}</p><p><b>Как исправить:</b> {{ x.suggestion }}</p></div>
+<p><b>Цитата:</b> «{{ x.quote_view }}»</p>{% if x.related_quote %}<p><b>Противоречит ({{ x.related_req }}):</b> «{{ x.related_view }}»</p>{% endif %}{% if x.binding_note %}<p class="muted"><b>Привязка:</b> {{ x.binding_note }}</p>{% endif %}<p><b>Проблема:</b> {{ x.explanation }}</p><p><b>Как исправить:</b> {{ x.suggestion }}</p></div>
 {% endfor %}
 
 <h2>4. Сводка</h2>
@@ -112,22 +114,23 @@
 <tr><th>Нарушений: FATAL / MAJOR / MINOR</th><td>{{ metrics.fatal_count }} / {{ metrics.major_count }} / {{ metrics.minor_count }} (всего {{ metrics.total_defects }})</td></tr>
 <tr><th>Подсказок (вне метрик)</th><td>{{ metrics.hints_count }}</td></tr>
 <tr><th>Плотность дефектов / индекс готовности</th><td>{{ metrics.defect_density }} / {{ metrics.readiness_score }}</td></tr>
-<tr><th>Оценка сэкономленных трудозатрат</th><td>{{ metrics.estimated_saved_hours }} ч</td></tr>
+<tr><th>Сэкономленные трудозатраты (базовый сценарий ROI)</th><td>{{ roi.base_hours if roi else metrics.estimated_saved_hours }} ч</td></tr>
 </table>
 {% if roi %}
 <h3>Бизнес-ценность (ROI)</h3>
-<p class="muted">Детерминированный расчёт на Decimal, без LLM. Коэффициенты — явные допущения (настраиваются в .env).</p>
-<table><tr><th>Статья</th><th>Расчёт</th><th>Часы</th></tr>
-{% for ln in roi.lines %}<tr><td>{{ ln.item }}</td><td>{{ ln.formula }}</td><td class="c">{{ ln.hours }}</td></tr>{% endfor %}
-<tr><th>Итого сэкономлено</th><td></td><td class="c"><b>{{ roi.total_hours }} ч</b></td></tr>
-<tr><th>В деньгах</th><td>{{ roi.total_hours }} ч × {{ roi.rate }} {{ roi.currency }}/ч</td><td class="c"><b>{{ roi.money }} {{ roi.currency }}</b></td></tr>
-<tr><th>Стоимость LLM-прогона</th><td colspan="2">{{ roi.llm_cost }}</td></tr>
+<p class="muted">Детерминированный расчёт на Decimal, без LLM. Два сценария, все коэффициенты — явные допущения из .env.</p>
+<table><tr><th>Статья</th><th>{{ roi.names[0] }}</th><th>{{ roi.names[1] }}</th><th>Расчёт (базовый)</th></tr>
+{% for r in roi.rows %}<tr><td>{{ r.item }}</td><td class="c">{{ r.vals[0] }} ч</td><td class="c">{{ r.vals[1] }} ч</td><td class="muted">{{ r.formulas[1] }}</td></tr>{% endfor %}
+<tr><th>Итого на этот документ</th><td class="c"><b>{{ roi.totals[0] }} ч</b></td><td class="c"><b>{{ roi.totals[1] }} ч</b></td><td></td></tr>
+<tr><th>В деньгах (× {{ roi.rate }} {{ roi.currency }}/ч)</th><td class="c"><b>{{ roi.money[0] }} {{ roi.currency }}</b></td><td class="c"><b>{{ roi.money[1] }} {{ roi.currency }}</b></td><td></td></tr>
+<tr><th>Поток {{ roi.docs }} ТЗ/мес</th><td class="c">{{ roi.monthly_hours[0] }} ч ≈ {{ roi.monthly_money[0] }} {{ roi.currency }}</td><td class="c">{{ roi.monthly_hours[1] }} ч ≈ {{ roi.monthly_money[1] }} {{ roi.currency }}</td><td class="muted">линейная экстраполяция</td></tr>
+<tr><th>Стоимость LLM-прогона</th><td colspan="3">{{ roi.llm_cost }}</td></tr>
 </table>
 <ul class="muted">{% for a in roi.assumptions %}<li>{{ a }}</li>{% endfor %}</ul>
 {% endif %}
 <h3>Критичные дефекты (FATAL и MAJOR)</h3>
 {% if critical %}<table><tr><th>ID</th><th>Уровень</th><th>Тип</th><th>Требование</th><th>Цитата</th><th>Суть</th><th>Проверка</th></tr>
-{% for x in critical %}<tr><td>{{ x.id }}</td><td><span class="badge {{ x.severity }}">{{ x.severity }}</span></td><td>{{ x.type }}</td><td>{{ x.req_id }}{% if x.related_req %} ↔ {{ x.related_req }}{% endif %}</td><td>«{{ x.quote }}»{% if x.related_quote %} ↔ «{{ x.related_quote }}»{% endif %}</td><td>{{ x.explanation }}</td><td>{{ x.source_label }}; {{ x.review }}</td></tr>
+{% for x in critical %}<tr><td>{{ x.id }}</td><td><span class="badge {{ x.severity }}">{{ x.severity }}</span></td><td>{{ x.type }}</td><td>{{ x.req_id }}{% if x.related_req %} ↔ {{ x.related_req }}{% endif %}</td><td>«{{ x.quote_view }}»{% if x.related_quote %} ↔ «{{ x.related_view }}»{% endif %}</td><td>{{ x.explanation }}</td><td>{{ x.source_label }}; {{ x.review }}</td></tr>
 {% endfor %}</table>{% else %}<p>Критичных дефектов не найдено.</p>{% endif %}
 
 <h2>5. Итог</h2>
@@ -135,6 +138,6 @@
 <table><tr><th>Можно начинать разработку?</th><td><b>{{ verdict.dev }}</b> — {{ verdict.dev_note }}</td></tr>
 <tr><th>Можно начинать тестирование?</th><td><b>{{ verdict.test }}</b> — {{ verdict.test_note }}</td></tr></table>
 <h3>Что исправить в первую очередь</h3>
-<ol>{% for r in remediation %}<li><b>{{ r.priority }}</b> — {{ r.action_item }} <span class="muted">Дефекты: {{ r.target_defect_ids | join(", ") }}. {{ r.business_impact }}</span></li>{% endfor %}</ol>
+<ol>{% for r in remediation %}<li><b>{{ r.priority }}</b> — {{ r.action_item }}{% if r.actions %}<ul>{% for a in r.actions %}<li>{{ a }}</li>{% endfor %}</ul>{% endif %}<div class="muted">Дефекты: {{ r.target_defect_ids | join(", ") }}. {{ r.business_impact }}</div></li>{% endfor %}</ol>
 <p class="muted">Отчёт сформирован автоматически агентом req-validator {{ passport.agent_version }} ({{ passport.git_commit }}).</p>
 </main></body></html>

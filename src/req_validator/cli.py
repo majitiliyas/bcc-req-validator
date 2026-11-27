@@ -172,9 +172,46 @@ async def _probe_models(settings: Settings) -> dict[str, tuple[bool, str]]:
     return results
 
 
+async def _ping_models(settings: Settings) -> dict[str, tuple[bool | None, str]]:
+    """Живой маленький JSON-запрос к каждой модели всех групп: работает ли модель прямо сейчас."""
+    from .llm_schemas import extract_json_text
+    from .router import ChatRequest, OpenAICompatTransport, ProviderError, build_groups, is_empty_response
+
+    transport = OpenAICompatTransport(settings.model_copy(update={"llm_timeout_s": 60.0}))
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}}, "required": ["ok"]}
+    req = ChatRequest(messages=[{"role": "user", "content": 'Верни JSON-объект {"ok": true}. Без пояснений.'}],
+                      json_schema=schema, max_tokens=512, step="ping")
+    seen: set[str] = set()
+    results: dict[str, tuple[bool | None, str]] = {}
+    for deps in build_groups(settings, probe_local=True).values():
+        for dep in deps:
+            if dep.name in seen:
+                continue
+            seen.add(dep.name)
+            if dep.provider == "ollama":
+                dep.timeout = 120.0
+            t0 = time.perf_counter()
+            try:
+                resp = await transport(dep, req)
+            except ProviderError as exc:
+                results[dep.name] = (False, f"{exc.kind} {exc.status or ''} за {time.perf_counter() - t0:.1f} с".strip())
+                continue
+            dt = time.perf_counter() - t0
+            if is_empty_response(resp):
+                results[dep.name] = (False, f"пустой ответ за {dt:.1f} с")
+                continue
+            try:
+                ok = json.loads(extract_json_text(resp.text)).get("ok") is True
+            except ValueError:
+                ok = False
+            results[dep.name] = (True if ok else None, f"{'валидный JSON' if ok else 'ответ не по схеме'} за {dt:.1f} с")
+    return results
+
+
 @app.command()
 def doctor(
     online: Annotated[bool, typer.Option("--online", help="Проверить ключи и slug'и моделей через /models (сеть, без расхода токенов)")] = False,
+    ping: Annotated[bool, typer.Option("--ping", help="Живой маленький JSON-запрос к каждой модели (несколько токенов на модель)")] = False,
 ) -> None:
     """Проверить окружение: Python, зависимости, ключи и маршрутизацию LLM, кэш, OCR, рендер PDF."""
     from .ingestion import ocr_available
@@ -248,6 +285,13 @@ def doctor(
         else:
             for name, (good, detail) in asyncio.run(_probe_models(settings)).items():
                 row(f"Онлайн: {name}", good, detail)
+
+    if ping:
+        if not any(groups.values()):
+            row("Ping моделей", None, "нет провайдеров для проверки")
+        else:
+            for name, (good, detail) in asyncio.run(_ping_models(settings)).items():
+                row(f"Ping: {name}", good if good is not False else None, detail)
 
     Console().print(table)
     if not ok:

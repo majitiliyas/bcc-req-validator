@@ -129,7 +129,7 @@ def test_gemini_quota_exhausted_falls_back_to_openrouter_and_ollama(free_setting
     fake = GeminiDown()
     report = run_audit(doc_path, demo=False, settings=free_settings, router=_router(free_settings, fake))
     ok_models = set(report.passport.llm.models_used)
-    assert ok_models and ok_models <= {"openrouter/openrouter/free", "ollama/qwen3.5:9b"}
+    assert ok_models and not any(m.startswith("gemini/") for m in ok_models)  # работа ушла на OpenRouter/Ollama
     assert report.passport.llm.rate_limited >= 1
     assert all(p.status in ("ok", "skipped") for p in report.passport.llm.passes)
 

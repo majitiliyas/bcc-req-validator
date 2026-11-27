@@ -160,9 +160,12 @@ def run_audit(input_path: str | Path, *, demo: bool = True, settings: Settings |
     passport = _passport(doc, run_id, started, t0, demo, model, commit, tag, notes)
     passport.llm = llm_info
     tokens = (llm_info.prompt_tokens, llm_info.completion_tokens) if llm_info else None
+    roi = compute_roi(metrics, settings, llm_tokens=tokens)
+    # Единый источник чисел: «сэкономленные часы» в сводке = базовый сценарий ROI.
+    metrics = metrics.model_copy(update={"estimated_saved_hours": roi.base.total_hours})
     return AuditReport(passport=passport, requirements=reqs, assessments=assessments, set_assessment=set_assessment,
                        defects=defects, metrics=metrics, verdict=verdict, remediation_plan=build_remediation(defects),
-                       roi=compute_roi(metrics, settings, llm_tokens=tokens))
+                       roi=roi)
 
 
 def _run_llm(settings: Settings, doc: IngestionResult, reqs: list, rule_defects: list[Defect], hints: list[Hint],
@@ -186,7 +189,8 @@ def _run_llm(settings: Settings, doc: IngestionResult, reqs: list, rule_defects:
             return None, info
         headings = [b for b in doc.blocks if b.block_type == BlockType.HEADING]
         outcome = asyncio.run(run_llm_audit(ctx, title=doc.title or doc.file_name, raw=doc.raw_markdown, reqs=reqs,
-                                            rule_defects=rule_defects, hints=hints, headings=headings))
+                                            rule_defects=rule_defects, hints=hints, headings=headings,
+                                            blocks=list(doc.blocks)))
     except Exception as exc:  # noqa: BLE001 — LLM-слой не должен ронять прогон
         tracer.event("llm_pipeline_error", error=f"{type(exc).__name__}: {exc}"[:400])
         notes.append(f"LLM-аудит прерван ({type(exc).__name__}: {str(exc)[:160]}); отчёт построен детерминированным слоем.")
@@ -209,6 +213,8 @@ def _run_llm(settings: Settings, doc: IngestionResult, reqs: list, rule_defects:
         info.unverified_rejected = len(outcome.rejected)
         info.rejected_examples = [f"{label} — {reason}" for label, reason in outcome.rejected[:10]]
         info.critic = outcome.critic_stats
+        info.critic_pairs = outcome.critic_pairs
+        info.full_context = bool(ctx.full_context)
         info.registry_size = {"terms": len(outcome.registry.terms), "roles": len(outcome.registry.roles),
                               "state_models": len(outcome.registry.state_models),
                               "numeric_facts": len(outcome.registry.numeric_facts)}

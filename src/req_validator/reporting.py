@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,24 @@ DEFECT_TYPE = {
 }
 
 
+def clean_md(text: str | None) -> str:
+    """Цитата для PDF/HTML без сырой Markdown-разметки: `**`, `` ` ``, строки таблиц «| a | b |» → «a · b».
+    В Markdown-отчёте цитаты остаются дословными (это доказательство)."""
+    if not text:
+        return ""
+    t = text.strip()
+    lines = []
+    for line in t.split("\n"):
+        ln = line.strip()
+        if ln.startswith("|") and ln.endswith("|") and ln.count("|") >= 2:
+            ln = " · ".join(c.strip() for c in ln.strip("|").split("|") if c.strip())
+        lines.append(ln)
+    t = " ".join(lines)
+    t = t.replace("**", "").replace("__", "").replace("`", "")
+    t = re.sub(r"^\s*[*+-]\s+", "", t)
+    return " ".join(t.split())
+
+
 def _section(path: str, depth: int = 2) -> str:
     parts = [p for p in path.split(" > ") if p]
     return " > ".join(parts[-depth:]) if parts else "—"
@@ -106,6 +125,7 @@ def _defect_view(d: Defect) -> dict[str, Any]:
         "id": d.defect_id, "severity": d.severity.value, "priority": d.priority, "rule_id": d.rule_id,
         "criterion": d.criterion, "type": DEFECT_TYPE.get(d.rule_id.split("/")[0], "прочее"),
         "req_id": d.req_id or "весь документ", "section": _section(d.section_path, 3), "quote": d.exact_quote,
+        "quote_view": clean_md(d.exact_quote), "related_view": clean_md(d.related_quote),
         "verified": d.quote_verified, "position": f"{d.quote_start}–{d.quote_end}" if d.quote_start is not None else "—",
         "explanation": d.explanation, "suggestion": d.suggestion, "risk": d.risk, "source": d.source.value,
     }
@@ -128,21 +148,26 @@ def build_view(report: AuditReport) -> dict[str, Any]:
         row = {
             "req_id": r.req_id, "source_id": src, "explicit": r.has_explicit_id, "section": _section(r.heading_path),
             "kind": KIND_TEXT[r.kind], "unit": UNIT_TEXT[r.unit_type], "short": r.short, "quote": r.text,
+            "quote_view": clean_md(r.text),
             "context": r.context or "", "page": r.page_num, "position": f"{r.start_char}–{r.end_char}",
         }
         requirements.append(row)
         if a is None:
             continue
+        own = [by_id[i] for i in a.defect_ids if i in by_id]
+        n_set = sum(1 for x in own if x["rule_id"].startswith("ISO-526"))
+        n_single = len(own) - n_set
         matrix.append({
             "req_id": r.req_id, "source_id": r.source_id or "—",
             "icons": [STATUS_ICON[c.status] for c in a.checks], "short": [STATUS_SHORT[c.status] for c in a.checks],
-            "n_defects": len(a.defect_ids), "n_hints": len(a.hints),
+            "n_defects": n_single, "n_set": n_set, "n_hints": len(a.hints),
         })
         if a.defect_ids or a.hints:
             details.append({
                 **row,
                 "defects": [by_id[i] for i in a.defect_ids if i in by_id],
-                "hints": [{"rule_id": h.rule_id, "message": h.message, "quote": h.exact_quote} for h in a.hints],
+                "hints": [{"rule_id": h.rule_id, "message": h.message, "quote": h.exact_quote,
+                           "quote_view": clean_md(h.exact_quote)} for h in a.hints],
                 "checks": [{"criterion": c.criterion, "rule_id": c.rule_id, "icon": STATUS_ICON[c.status],
                             "status": STATUS_TEXT[c.status], "short": STATUS_SHORT[c.status], "comment": c.comment}
                            for c in a.checks if c.status in (CheckStatus.FAIL, CheckStatus.WARN)],
@@ -160,10 +185,10 @@ def build_view(report: AuditReport) -> dict[str, Any]:
         "passport": {
             "document_title": p.document_title, "file_name": p.file_name, "file_size": f"{p.file_size_bytes:,}".replace(",", " "),
             "sha256": p.sha256, "format": p.source_format, "encoding": p.detected_encoding,
-            "pages": p.page_count if p.page_count is not None else "—",
+            "pages": p.page_count if p.page_count is not None else "",
             "run_date": f"{p.run_started_at:%d.%m.%Y %H:%M:%S %Z}".strip(), "run_id": p.run_id,
             "duration": f"{p.duration_s:.2f} с", "mode": "демо (без LLM и сети)" if p.mode == "demo" else "LLM",
-            "model": p.model, "agent_version": p.agent_version, "git_commit": p.git_commit, "git_tag": p.git_tag or "—",
+            "model": p.model, "agent_version": p.agent_version, "git_commit": p.git_commit, "git_tag": p.git_tag or "",
             "ingestion_status": p.ingestion_status.value, "warnings": p.ingestion_warnings, "notes": p.pipeline_notes,
         },
         "metrics": m.model_dump(),
@@ -206,6 +231,9 @@ def _llm_view(report: AuditReport) -> dict[str, Any] | None:
         "rate_limited": info.rate_limited, "reroutes": info.reroutes,
         "unverified": info.unverified_rejected, "rejected_examples": info.rejected_examples,
         "critic": ", ".join(f"{k}: {v}" for k, v in info.critic.items()) or "—",
+        "critic_pairs": "; ".join(f"{k} ×{v}" for k, v in info.critic_pairs.items()) or "—",
+        "full_context": "да (документ ≤ порога передан целиком в Pass 1, Pass 2 и Критику)" if info.full_context
+                        else "нет (документ больше порога — используется Глобальный реестр)",
         "pii": ", ".join(f"{k}: {v}" for k, v in info.pii_masked.items()) or "не обнаружено",
         "budget": ", ".join(f"{k}: {v}" for k, v in info.budget.items()),
         "registry": ", ".join(f"{k}: {v}" for k, v in info.registry_size.items()) or "—",
@@ -228,10 +256,18 @@ def _roi_view(report: AuditReport) -> dict[str, Any] | None:
     roi = report.roi
     if roi is None:
         return None
+    scen = roi.scenarios
+    rows = []
+    for i, line in enumerate(scen[0].lines):
+        rows.append({"item": line.item, "vals": [_num(s.lines[i].hours, 1) for s in scen],
+                     "formulas": [s.lines[i].formula for s in scen]})
     return {
-        "lines": [{"item": ln.item, "formula": ln.formula, "hours": _num(ln.hours, 1)} for ln in roi.lines],
-        "total_hours": _num(roi.total_hours, 1), "rate": _num(roi.hourly_rate), "currency": roi.currency,
-        "money": _num(roi.total_money), "assumptions": roi.assumptions, "llm_cost": roi.llm_cost,
+        "names": [s.name for s in scen], "rows": rows,
+        "totals": [_num(s.total_hours, 1) for s in scen], "money": [_num(s.money) for s in scen],
+        "monthly_hours": [_num(s.monthly_hours, 1) for s in scen], "monthly_money": [_num(s.monthly_money) for s in scen],
+        "rate": _num(roi.hourly_rate), "currency": roi.currency, "docs": roi.docs_per_month,
+        "assumptions": roi.assumptions, "llm_cost": roi.llm_cost,
+        "base_hours": _num(roi.base.total_hours, 1), "base_money": _num(roi.base.money),
     }
 
 
@@ -288,7 +324,8 @@ def render_pdf(report: AuditReport) -> bytes:
     import typst
 
     template = (TEMPLATES_DIR / "report.typ").read_bytes()
-    data = json.dumps(build_view(report), ensure_ascii=False, default=str)
+    # «₸» отсутствует во многих шрифтах (Typst подставляет чужой глиф) — в PDF детерминированно пишем «KZT».
+    data = json.dumps(build_view(report), ensure_ascii=False, default=str).replace("₸", "KZT")
     result = typst.compile(template, sys_inputs={"report": data})
     if not isinstance(result, bytes):
         raise RuntimeError("typst не вернул PDF")

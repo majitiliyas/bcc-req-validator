@@ -194,10 +194,22 @@ def build_groups(settings: Settings, *, probe_local: bool = False) -> dict[str, 
     """Собрать группы из настроек. probe_local=True — включать Ollama, только если он отвечает."""
     groups: dict[str, list[Deployment]] = {}
     use_ollama = settings.enable_ollama and (not probe_local or ollama_reachable(settings))
-    for group, raw in (("deep", settings.deep_models), ("fast", settings.fast_models)):
-        deps = [d for s in raw.split(",") if s.strip() and (d := parse_deployment(s, settings))]
+    shared: dict[str, Deployment] = {}  # одна модель в нескольких группах — общий cooldown/статус
+
+    def get(spec_str: str) -> Deployment | None:
+        name = spec_str.strip()
+        if name not in shared:
+            dep = parse_deployment(name, settings)
+            if dep is None:
+                return None
+            shared[name] = dep
+        return shared[name]
+
+    for group, raw in (("deep", settings.deep_models), ("fast", settings.fast_models),
+                       ("critic", settings.critic_models)):
+        deps = [d for s in raw.split(",") if s.strip() and (d := get(s))]
         if group == "deep" and use_ollama:
-            local = parse_deployment(f"ollama/{settings.ollama_model}", settings)
+            local = get(f"ollama/{settings.ollama_model}")
             if local:
                 deps.append(local)
         groups[group] = deps
@@ -334,7 +346,7 @@ class RouterStats:
 
 
 class LLMRouter:
-    GROUP_FALLBACK = {"fast": ["fast", "deep"], "deep": ["deep"]}
+    GROUP_FALLBACK = {"fast": ["fast", "deep"], "deep": ["deep"], "critic": ["critic", "deep"]}
 
     def __init__(
         self,

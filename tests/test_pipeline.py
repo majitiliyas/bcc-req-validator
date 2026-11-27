@@ -53,7 +53,7 @@ def test_metrics_formulas(fixtures: Path, settings) -> None:
     n = m.total_requirements
     expected = max(0.0, 100 - (m.fatal_count * 15 + m.major_count / n * 100 + m.minor_count / n * 20))
     assert abs(m.readiness_score - round(expected, 1)) < 0.06
-    assert m.estimated_saved_hours == m.fatal_count * 16 + m.major_count * 6 + m.minor_count
+    assert r.roi is not None and m.estimated_saved_hours == r.roi.base.total_hours  # единый источник чисел
 
 
 def test_report_contains_all_sections(fixtures: Path, settings) -> None:
